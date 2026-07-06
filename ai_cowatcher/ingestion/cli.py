@@ -8,6 +8,7 @@ import sys
 
 from ai_cowatcher.config import get_settings
 from ai_cowatcher.ingestion.pipeline import run_ingestion
+from ai_cowatcher.providers.litellm_env import configure_litellm_env
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = get_settings()
+    configure_litellm_env(settings)
     logging.basicConfig(level=settings.log_level)
 
     try:

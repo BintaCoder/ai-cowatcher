@@ -11,9 +11,10 @@ logs:
 
 install:
 	python3.12 -m venv .venv
-	.venv/bin/pip install --upgrade pip setuptools wheel
-	.venv/bin/pip install -r requirements.txt
-	.venv/bin/pip install -e .
+	.venv/bin/python3.12 -m pip install --upgrade pip setuptools wheel
+	.venv/bin/python3.12 -m pip install -r requirements.txt
+	.venv/bin/python3.12 -m pip install -e .
+	@echo "$(CURDIR)" > .venv/lib/python3.12/site-packages/cowatcher-dev.pth
 
 api:
 	.venv/bin/uvicorn ai_cowatcher.main:app --host 0.0.0.0 --port 8000 --reload

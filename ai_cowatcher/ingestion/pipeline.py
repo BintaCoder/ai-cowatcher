@@ -12,7 +12,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from ai_cowatcher.config import Settings, get_settings
 from ai_cowatcher.db.base import create_db_engine, init_database
 from ai_cowatcher.domain import SceneBoundary, SceneEventRecord
+from ai_cowatcher.ingestion.transcription import transcripts_for_scenes
 from ai_cowatcher.providers.factory import IngestionProviders, build_ingestion_providers
+from ai_cowatcher.providers.litellm_env import configure_litellm_env
 from ai_cowatcher.storage.postgres_store import SceneEventRepository
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 
@@ -44,6 +46,7 @@ class IngestionPipeline:
         self._qdrant = qdrant_store or QdrantSceneStore(self._settings)
 
     def run(self, title_id: str, video_path: str, *, force: bool = False) -> IngestionResult:
+        configure_litellm_env(self._settings)
         video = Path(video_path)
         if not video.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
@@ -87,12 +90,11 @@ class IngestionPipeline:
         with tempfile.TemporaryDirectory(prefix="cowatcher-audio-") as tmpdir:
             audio_path = str(Path(tmpdir) / "title_audio.wav")
             self._providers.audio_extractor.extract_audio(video_path, audio_path)
-            transcripts = [
-                self._providers.transcriber.transcribe_window(
-                    audio_path, scene.start_ts, scene.end_ts
-                )
-                for scene in scenes
-            ]
+            transcripts = transcripts_for_scenes(
+                self._providers.transcriber,
+                audio_path,
+                scenes,
+            )
 
         face_clusters = [
             self._providers.face_analyzer.detect_face_clusters(video_path, title_id, scene)

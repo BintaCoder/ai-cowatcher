@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import platform
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from scenedetect.detectors import ContentDetector
 
 from ai_cowatcher.config import Settings
 from ai_cowatcher.domain import SceneBoundary
+from ai_cowatcher.ingestion.transcription import TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +71,38 @@ class FasterWhisperTranscriber:
     def __init__(self, settings: Settings):
         from faster_whisper import WhisperModel
 
+        self._device = settings.whisper_device
+        logger.info(
+            "Loading Whisper model=%s device=%s compute_type=%s",
+            settings.whisper_model_size,
+            settings.whisper_device,
+            settings.whisper_compute_type,
+        )
         self._model = WhisperModel(
             settings.whisper_model_size,
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
             num_workers=settings.whisper_num_workers,
         )
+
+    def transcribe_full(self, audio_path: str) -> list[TranscriptSegment]:
+        logger.info("Transcribing full audio once (device=%s)", self._device)
+        segments, info = self._model.transcribe(audio_path)
+        if info.language:
+            logger.info(
+                "Whisper language=%s probability=%.2f",
+                info.language,
+                info.language_probability or 0.0,
+            )
+        return [
+            TranscriptSegment(
+                start_ts=float(segment.start),
+                end_ts=float(segment.end),
+                text=segment.text.strip(),
+            )
+            for segment in segments
+            if segment.text.strip()
+        ]
 
     def transcribe_window(self, audio_path: str, start_ts: float, end_ts: float) -> str:
         segments, _ = self._model.transcribe(
@@ -88,7 +116,15 @@ class InsightFaceAnalyzer:
     def __init__(self, settings: Settings):
         from insightface.app import FaceAnalysis
 
-        self._app = FaceAnalysis(name=settings.insightface_model)
+        providers = _insightface_providers()
+        if providers:
+            logger.info("InsightFace ONNX providers=%s", providers)
+            self._app = FaceAnalysis(
+                name=settings.insightface_model,
+                providers=providers,
+            )
+        else:
+            self._app = FaceAnalysis(name=settings.insightface_model)
         self._app.prepare(ctx_id=settings.insightface_ctx_id, det_size=(640, 640))
         self._similarity_threshold = 0.45
 
@@ -175,9 +211,16 @@ class BgeM3Embedder:
     def __init__(self, settings: Settings):
         from FlagEmbedding import BGEM3FlagModel
 
+        use_fp16 = settings.embedding_device in ("cuda", "mps")
+        logger.info(
+            "Loading BGE-M3 model=%s device=%s use_fp16=%s",
+            settings.embedding_model,
+            settings.embedding_device,
+            use_fp16,
+        )
         self._model = BGEM3FlagModel(
             settings.embedding_model,
-            use_fp16=False,
+            use_fp16=use_fp16,
             device=settings.embedding_device,
         )
 
@@ -185,6 +228,19 @@ class BgeM3Embedder:
         output = self._model.encode(texts, return_dense=True, return_sparse=False)
         dense = output["dense_vecs"]
         return [vector.tolist() for vector in dense]
+
+
+def _insightface_providers() -> list[str] | None:
+    if platform.system() != "Darwin":
+        return None
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return None
+    available = ort.get_available_providers()
+    if "CoreMLExecutionProvider" in available:
+        return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    return None
 
 
 def _read_frame_at(video_path: str, timestamp_s: float):
