@@ -21,6 +21,7 @@ from ai_cowatcher.db.base import init_database
 from ai_cowatcher.agent.metrics import conversation_tier_counts, metrics_lite_summary
 from ai_cowatcher.health import collect_dependency_health, overall_status
 from ai_cowatcher.providers.litellm_env import configure_litellm_env
+from ai_cowatcher.realtime.viewing_session import build_viewing_session
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_litellm_env(settings)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(app: FastAPI):
         init_database(settings=settings)
+        logger.info("Warming real-time viewing session (embedder, stores, agent)")
+        app.state.viewing_session = build_viewing_session(settings)
         yield
 
     app = FastAPI(

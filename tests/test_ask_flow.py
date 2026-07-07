@@ -117,12 +117,9 @@ def test_ask_after_reveal_returns_grounded_answer(viewing_session):
     assert "don't know yet" not in result.answer.lower()
 
 
-def test_post_ask_endpoint(viewing_session, test_settings: Settings, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        "ai_cowatcher.api.ask_routes.build_viewing_session",
-        lambda: viewing_session,
-    )
+def test_post_ask_endpoint(viewing_session, test_settings: Settings):
     app = create_app(test_settings)
+    app.state.viewing_session = viewing_session
     client = TestClient(app)
 
     early = client.post(

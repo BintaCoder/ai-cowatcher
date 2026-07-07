@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ from ai_cowatcher.storage.qdrant_knowledge_store import QdrantKnowledgeStore
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 from ai_cowatcher.storage.user_memory_store import UserMemoryStore, build_user_memory_store
 from sqlalchemy.orm import sessionmaker
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,12 +59,44 @@ class ViewingSession:
         self._settings = settings
         self._session_factory = session_factory
         self._user_memory_store = user_memory_store
+        self._title_display_names: dict[str, str | None] = {}
 
     def _lookup_title_display_name(self, title_id: str) -> str | None:
+        if title_id in self._title_display_names:
+            return self._title_display_names[title_id]
         if self._session_factory is None:
             return None
         with self._session_factory() as session:
-            return SceneEventRepository(session).get_display_name(title_id)
+            display_name = SceneEventRepository(session).get_display_name(title_id)
+        self._title_display_names[title_id] = display_name
+        return display_name
+
+    def persist_memory(
+        self,
+        *,
+        user_id: str,
+        title_id: str,
+        question: str,
+        answer: str,
+        current_ts: float,
+    ) -> None:
+        """Write conversation turns to Postgres + Redis (off the /ask critical path)."""
+        if self._user_memory_store is None:
+            return
+        self._user_memory_store.append_turn(
+            user_id=user_id,
+            title_id=title_id,
+            role="user",
+            content=question,
+            current_ts=current_ts,
+        )
+        self._user_memory_store.append_turn(
+            user_id=user_id,
+            title_id=title_id,
+            role="assistant",
+            content=answer,
+            current_ts=current_ts,
+        )
 
     def ask(
         self,
@@ -70,6 +105,7 @@ class ViewingSession:
         current_ts: float,
         question: str,
         user_id: str,
+        persist_memory: bool = True,
     ) -> AskResult:
         started = time.perf_counter()
         title_display_name = self._lookup_title_display_name(title_id)
@@ -99,19 +135,12 @@ class ViewingSession:
             )
         )
 
-        if self._user_memory_store is not None:
-            self._user_memory_store.append_turn(
+        if persist_memory:
+            self.persist_memory(
                 user_id=user_id,
                 title_id=title_id,
-                role="user",
-                content=question,
-                current_ts=current_ts,
-            )
-            self._user_memory_store.append_turn(
-                user_id=user_id,
-                title_id=title_id,
-                role="assistant",
-                content=answer.text,
+                question=question,
+                answer=answer.text,
                 current_ts=current_ts,
             )
 
@@ -149,9 +178,17 @@ def build_viewing_session(
     user_memory_store: UserMemoryStore | None = None,
 ) -> ViewingSession:
     settings = settings or get_settings()
+    logger.info(
+        "Building warm viewing session (mock_mode=%s, embedding_device=%s)",
+        settings.mock_mode,
+        settings.embedding_device,
+    )
     qdrant = qdrant_store or QdrantSceneStore(settings)
     knowledge_qdrant = knowledge_store or QdrantKnowledgeStore(settings)
     embedder = embedder or _build_embedder(settings)
+    if not settings.mock_mode:
+        embedder.embed_texts(["warmup"])
+        logger.info("Embedding model warmed")
     scene_lookup = SceneLookupTool(embedder, qdrant, settings)
     knowledge_search = KnowledgeSearchTool(embedder, knowledge_qdrant, settings)
     cast_lookup = CastLookupTool(settings) if settings.cast_lookup_enabled else None
