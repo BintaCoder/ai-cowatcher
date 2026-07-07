@@ -53,7 +53,14 @@ class IngestionPipeline:
         self._session_factory = session_factory
         self._qdrant = qdrant_store or QdrantSceneStore(self._settings)
 
-    def run(self, title_id: str, video_path: str, *, force: bool = False) -> IngestionResult:
+    def run(
+        self,
+        title_id: str,
+        video_path: str,
+        *,
+        force: bool = False,
+        display_name: str | None = None,
+    ) -> IngestionResult:
         configure_litellm_env(self._settings)
         video = Path(video_path)
         if not video.exists():
@@ -82,7 +89,7 @@ class IngestionPipeline:
                     len(existing_scene_ids),
                 )
 
-            repo.mark_processing(title_id, str(video))
+            repo.mark_processing(title_id, str(video), display_name=display_name)
 
             try:
                 newly_processed = self._process_video(
@@ -281,5 +288,16 @@ def _build_scene_event(
     )
 
 
-def run_ingestion(title_id: str, video_path: str, *, force: bool = False) -> IngestionResult:
-    return IngestionPipeline().run(title_id, video_path, force=force)
+def run_ingestion(
+    title_id: str,
+    video_path: str,
+    *,
+    force: bool = False,
+    display_name: str | None = None,
+) -> IngestionResult:
+    return IngestionPipeline().run(
+        title_id,
+        video_path,
+        force=force,
+        display_name=display_name,
+    )

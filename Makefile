@@ -1,4 +1,4 @@
-.PHONY: up down logs install api health
+.PHONY: up down logs install api worker health
 
 up:
 	docker compose up -d
@@ -18,6 +18,9 @@ install:
 
 api:
 	.venv/bin/uvicorn ai_cowatcher.main:app --host 0.0.0.0 --port 8000 --reload
+
+worker:
+	.venv/bin/cowatcher-ingest-worker
 
 health:
 	curl -s http://localhost:8000/health | python3 -m json.tool

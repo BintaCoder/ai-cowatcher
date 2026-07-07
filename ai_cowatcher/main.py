@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from ai_cowatcher import __version__
+from ai_cowatcher.api.catalog_routes import router as catalog_router
 from ai_cowatcher.api.ask_routes import router as ask_router
 from ai_cowatcher.api.navigate_routes import router as navigate_router
 from ai_cowatcher.api.watch_routes import router as watch_router
@@ -40,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    app.include_router(catalog_router)
     app.include_router(ingest_router)
     app.include_router(ask_router)
     app.include_router(navigate_router)

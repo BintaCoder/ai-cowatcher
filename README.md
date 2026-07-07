@@ -26,14 +26,17 @@ With `MOCK_MODE=true` (default), AI providers use local mocks — no API keys re
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /health` | Dependency health + config summary |
-| `POST /ingest` | Queue offline title ingestion |
+| `POST /catalog/titles` | Register a new title and publish an ingest event |
+| `POST /ingest` | Publish an ingest event for an existing or new title |
 | `POST /ask` | Real-time co-watcher Q&A |
 | `GET /metrics-lite` | Pilot KPIs (latency, escalation, don't-know rate) |
 
 ## CLI
 
 ```bash
-cowatcher-ingest --title-id demo --video /path/to/video.mp4
+cowatcher-ingest --title-id demo --video /path/to/video.mp4   # direct (no broker)
+cowatcher-ingest-worker                                       # consume broker events
+make worker                                                   # same as above
 cowatcher-metrics-lite < ask.log   # summarize JSON ask logs
 ```
 

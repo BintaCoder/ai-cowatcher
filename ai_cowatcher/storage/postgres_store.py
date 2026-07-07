@@ -35,7 +35,39 @@ class SceneEventRepository:
         title = self.get_title(title_id)
         return title is not None and title.status == "completed"
 
-    def mark_processing(self, title_id: str, video_path: str) -> TitleIngestion:
+    def register_queued(
+        self,
+        title_id: str,
+        video_path: str,
+        *,
+        display_name: str | None = None,
+    ) -> TitleIngestion:
+        """Record a cataloged title awaiting the offline ingest worker."""
+        title = self.get_title(title_id)
+        if title is None:
+            title = TitleIngestion(
+                title_id=title_id,
+                video_path=video_path,
+                status="queued",
+                display_name=display_name,
+            )
+            self._session.add(title)
+        else:
+            title.video_path = video_path
+            title.status = "queued"
+            title.error_message = None
+            if display_name:
+                title.display_name = display_name
+        self._session.commit()
+        return title
+
+    def mark_processing(
+        self,
+        title_id: str,
+        video_path: str,
+        *,
+        display_name: str | None = None,
+    ) -> TitleIngestion:
         title = self.get_title(title_id)
         if title is None:
             title = TitleIngestion(title_id=title_id, video_path=video_path, status="processing")
@@ -44,6 +76,8 @@ class SceneEventRepository:
             title.video_path = video_path
             title.status = "processing"
             title.error_message = None
+        if display_name:
+            title.display_name = display_name
         self._session.commit()
         return title
 

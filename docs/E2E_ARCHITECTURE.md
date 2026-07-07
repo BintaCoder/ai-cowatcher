@@ -33,6 +33,7 @@ flowchart TB
     subgraph API["ai-cowatcher API (FastAPI + Uvicorn)"]
         ASK["POST /ask"]
         NAV["POST /navigate"]
+        CATALOG["POST /catalog/titles"]
         INGEST["POST /ingest"]
         STREAM["GET /video/{title_id}"]
         AGENT["ConversationAgent"]
@@ -41,7 +42,12 @@ flowchart TB
         CAST["cast_lookup tool"]
     end
 
-    subgraph Offline["Offline ingestion (CLI / background worker)"]
+    subgraph Messaging["Message broker (config-driven)"]
+        BROKER["Kafka or RabbitMQ\n(or in-memory for dev)"]
+    end
+
+    subgraph Offline["Offline ingestion worker"]
+        WORKER["cowatcher-ingest-worker"]
         PIPE["IngestionPipeline"]
         SCENE["PySceneDetect"]
         FFMPEG["FFmpeg"]
@@ -78,7 +84,10 @@ flowchart TB
     CAST --> TMDB
     AGENT --> OPENAI
     STREAM --> FS
-    INGEST --> PIPE
+    CATALOG --> BROKER
+    INGEST --> BROKER
+    BROKER --> WORKER
+    WORKER --> PIPE
     PIPE --> SCENE & FFMPEG & WHISPER & FACE & VISION & EMBED
     PIPE --> PG & QD
     VISION --> OPENAI
@@ -90,13 +99,19 @@ flowchart TB
 
 ## 3. Sequence diagram — offline ingestion
 
-Runs once per title via `cowatcher-ingest` or `POST /ingest` (background).
+Runs once per title via `cowatcher-ingest` (direct), `POST /catalog/titles`, or `POST /ingest` (both publish an event to the message broker). A separate **`cowatcher-ingest-worker`** process consumes events and runs the resumable pipeline.
+
+**Broker choice** (`MESSAGE_BROKER`): `memory` (local dev/tests), `rabbitmq` (smaller deployments), or `kafka` (larger scale). Producer and consumer share the same interface.
+
+**Resumability:** each scene is committed to Postgres immediately (`save_scene_event`). If a worker pod dies mid-job, the broker redelivers the event; the pipeline skips `existing_scene_ids` and continues from the last persisted scene.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Operator
-    participant CLI as Ingest CLI / API worker
+    participant API as API / CLI
+    participant MQ as Kafka / RabbitMQ
+    participant Worker as cowatcher-ingest-worker
     participant Pipe as IngestionPipeline
     participant SD as PySceneDetect
     participant FF as FFmpeg
@@ -107,8 +122,10 @@ sequenceDiagram
     participant PG as PostgreSQL
     participant QD as Qdrant
 
-    Operator->>CLI: ingest --title-id X --video path
-    CLI->>Pipe: run(title_id, video_path)
+    Operator->>API: POST /catalog/titles or cowatcher-ingest
+    API->>MQ: publish IngestTitleEvent
+    MQ->>Worker: deliver event (retry on nack)
+    Worker->>Pipe: run(title_id, video_path)
     Pipe->>PG: mark_processing, check resume state
     Pipe->>SD: detect_scenes(video)
     SD-->>Pipe: scene boundaries (start_ts, end_ts)
@@ -406,7 +423,8 @@ Qdrant point (per scene)
 | GET | `/titles` | List completed ingested titles |
 | GET | `/video/{title_id}` | Stream video (HTTP Range) |
 | POST | `/ask` | Real-time co-watcher question |
-| POST | `/ingest` | Queue background ingestion |
+| POST | `/catalog/titles` | Register title + publish ingest event |
+| POST | `/ingest` | Publish ingest event (legacy enqueue endpoint) |
 | GET | `/health` | Dependency + config health |
 | GET | `/metrics-lite` | Pilot KPIs (latency, escalation rate) |
 

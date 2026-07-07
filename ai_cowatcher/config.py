@@ -144,6 +144,22 @@ class Settings(BaseSettings):
     knowledge_top_k: int = Field(default=5, alias="KNOWLEDGE_TOP_K")
     knowledge_dir: str = Field(default="knowledge", alias="KNOWLEDGE_DIR")
 
+    # ── Event-driven ingestion (Kafka / RabbitMQ / in-memory) ─────────────────
+    message_broker: Literal["memory", "rabbitmq", "kafka"] = Field(
+        default="memory", alias="MESSAGE_BROKER"
+    )
+    ingest_topic: str = Field(default="title.ingest", alias="INGEST_TOPIC")
+    ingest_queue_name: str = Field(default="title.ingest", alias="INGEST_QUEUE_NAME")
+    rabbitmq_url: str = Field(
+        default="amqp://guest:guest@localhost:5672/", alias="RABBITMQ_URL"
+    )
+    kafka_bootstrap_servers: str = Field(
+        default="localhost:9092", alias="KAFKA_BOOTSTRAP_SERVERS"
+    )
+    kafka_consumer_group: str = Field(
+        default="cowatcher-ingest", alias="KAFKA_CONSUMER_GROUP"
+    )
+
     # ── User conversation memory ────────────────────────────────────────────────
     user_memory_max_turns: int = Field(default=10, alias="USER_MEMORY_MAX_TURNS")
     user_memory_cache_turns: int = Field(default=20, alias="USER_MEMORY_CACHE_TURNS")

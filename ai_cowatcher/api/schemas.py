@@ -11,6 +11,20 @@ class IngestRequest(BaseModel):
     force: bool = False
 
 
+class CatalogTitleRequest(BaseModel):
+    title_id: str = Field(..., min_length=1, max_length=128)
+    video_path: str = Field(..., min_length=1)
+    display_name: str | None = Field(default=None, max_length=512)
+    force: bool = False
+
+
+class CatalogTitleResponse(BaseModel):
+    status: str
+    title_id: str
+    event_id: str
+    message: str
+
+
 class IngestResponse(BaseModel):
     status: str
     title_id: str
