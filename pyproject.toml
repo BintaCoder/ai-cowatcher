@@ -44,6 +44,9 @@ cowatcher-metrics-lite = "ai_cowatcher.observability.summarize_logs:main"
 where = ["."]
 include = ["ai_cowatcher*"]
 
+[tool.setuptools.package-data]
+ai_cowatcher = ["web/*.html"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from ai_cowatcher.config import Settings, get_settings
@@ -30,3 +30,15 @@ def init_database(engine=None, settings: Settings | None = None) -> None:
     if engine is None:
         engine = create_db_engine(settings=settings)
     Base.metadata.create_all(bind=engine)
+    _apply_lightweight_migrations(engine)
+
+
+def _apply_lightweight_migrations(engine) -> None:
+    """Pilot-safe additive migrations (no Alembic yet)."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE title_ingestions "
+                "ADD COLUMN IF NOT EXISTS display_name VARCHAR(512)"
+            )
+        )

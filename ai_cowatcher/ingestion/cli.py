@@ -34,6 +34,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if result.skipped:
         print(f"Skipped existing title {result.title_id} ({result.scene_count} scenes)")
+    elif result.resumed:
+        print(
+            f"Resumed {result.title_id}: added {result.newly_processed} scene(s), "
+            f"{result.scene_count} total"
+        )
     else:
         print(f"Ingested {result.title_id} with {result.scene_count} scenes")
     return 0

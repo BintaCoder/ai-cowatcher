@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from ai_cowatcher.config import Settings, get_settings
 from ai_cowatcher.db.base import create_db_engine, init_database
@@ -26,6 +27,8 @@ class IngestionResult:
     title_id: str
     scene_count: int
     skipped: bool = False
+    resumed: bool = False
+    newly_processed: int = 0
 
 
 class IngestionPipeline:
@@ -65,27 +68,57 @@ class IngestionPipeline:
                 repo.delete_title_data(title_id)
                 self._qdrant.delete_title(title_id)
 
+            existing_scene_ids = repo.get_existing_scene_ids(title_id)
+            resuming = bool(existing_scene_ids)
+            if resuming:
+                logger.info(
+                    "Resuming ingest for title %s; %d scenes already persisted",
+                    title_id,
+                    len(existing_scene_ids),
+                )
+
             repo.mark_processing(title_id, str(video))
 
             try:
-                events = self._process_video(title_id, str(video))
-                vectors = self._providers.embedder.embed_texts(
-                    [event.embedding_text for event in events]
+                newly_processed = self._process_video(
+                    title_id, str(video), repo, existing_scene_ids
                 )
-                self._qdrant.ensure_collection(self._providers.embedder.vector_size)
-                repo.save_scene_events(events)
-                self._qdrant.upsert_scene_events(events, vectors)
-                repo.mark_completed(title_id, len(events))
-                return IngestionResult(title_id=title_id, scene_count=len(events))
+                total = repo.count_scene_events(title_id)
+                repo.mark_completed(title_id, total)
+                return IngestionResult(
+                    title_id=title_id,
+                    scene_count=total,
+                    resumed=resuming,
+                    newly_processed=newly_processed,
+                )
             except Exception as exc:
                 logger.exception("Ingestion failed for title %s", title_id)
                 repo.mark_failed(title_id, str(exc))
                 raise
 
-    def _process_video(self, title_id: str, video_path: str) -> list[SceneEventRecord]:
+    def _process_video(
+        self,
+        title_id: str,
+        video_path: str,
+        repo: SceneEventRepository,
+        existing_scene_ids: set[str],
+    ) -> int:
         scenes = self._providers.scene_detector.detect_scenes(video_path)
         if not scenes:
             raise ValueError("No scenes detected")
+
+        pending = [scene for scene in scenes if scene.scene_id not in existing_scene_ids]
+        if not pending:
+            logger.info("All %d scenes already persisted for title %s", len(scenes), title_id)
+            return 0
+
+        logger.info(
+            "Processing %d/%d scenes for title %s (%d already done)",
+            len(pending),
+            len(scenes),
+            title_id,
+            len(scenes) - len(pending),
+        )
 
         with tempfile.TemporaryDirectory(prefix="cowatcher-audio-") as tmpdir:
             audio_path = str(Path(tmpdir) / "title_audio.wav")
@@ -93,21 +126,36 @@ class IngestionPipeline:
             transcripts = transcripts_for_scenes(
                 self._providers.transcriber,
                 audio_path,
-                scenes,
+                pending,
             )
 
-        face_clusters = [
-            self._providers.face_analyzer.detect_face_clusters(video_path, title_id, scene)
-            for scene in scenes
-        ]
-        captions = self._providers.captioner.caption_scenes(video_path, scenes)
+        self._qdrant.ensure_collection(self._providers.embedder.vector_size)
 
-        return [
-            _build_scene_event(title_id, scene, transcript, caption, clusters)
-            for scene, transcript, caption, clusters in zip(
-                scenes, transcripts, captions, face_clusters, strict=True
+        delay = self._settings.vision_caption_delay_sec
+        processed = 0
+        for scene, transcript in zip(pending, transcripts, strict=True):
+            clusters = self._providers.face_analyzer.detect_face_clusters(
+                video_path, title_id, scene
             )
-        ]
+            caption = self._providers.captioner.caption_scenes(video_path, [scene])[0]
+            event = _build_scene_event(title_id, scene, transcript, caption, clusters)
+
+            vector = self._providers.embedder.embed_texts([event.embedding_text])[0]
+            self._qdrant.upsert_scene_events([event], [vector])
+            repo.save_scene_event(event)
+
+            processed += 1
+            logger.info(
+                "Persisted scene %s (%d/%d) for title %s",
+                scene.scene_id,
+                processed,
+                len(pending),
+                title_id,
+            )
+            if processed < len(pending) and delay > 0:
+                time.sleep(delay)
+
+        return processed
 
 
 def _build_scene_event(

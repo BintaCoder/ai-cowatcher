@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Co-watcher</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a3140;
+      --text: #e8ecf3;
+      --muted: #9aa4b8;
+      --accent: #5b8cff;
+      --accent-pressed: #3f6fe0;
+      --danger: #ff6b6b;
+      --ok: #5bd18a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .layout {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1.25rem;
+      display: grid;
+      gap: 1rem;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 650;
+    }
+    .subtitle { color: var(--muted); font-size: 0.9rem; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1rem;
+    }
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    label { color: var(--muted); font-size: 0.85rem; }
+    select, button {
+      font: inherit;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #10141c;
+      color: var(--text);
+      padding: 0.55rem 0.85rem;
+    }
+    select { min-width: 220px; }
+    button {
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.05s ease;
+    }
+    button:hover:not(:disabled) { background: #1a2130; }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    #micBtn.listening {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    #micBtn.listening:hover { background: var(--accent-pressed); }
+    video {
+      width: 100%;
+      max-height: 62vh;
+      background: #000;
+      border-radius: 12px;
+      display: block;
+    }
+    .status {
+      min-height: 1.25rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .status.thinking { color: var(--accent); }
+    .status.error { color: var(--danger); }
+    .status.ok { color: var(--ok); }
+    .transcript {
+      display: grid;
+      gap: 0.75rem;
+    }
+    .bubble {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 0.75rem 0.9rem;
+      background: #12161f;
+    }
+    .bubble h3 {
+      margin: 0 0 0.35rem;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+    .bubble p {
+      margin: 0;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+    .toolbar {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-top: 0.75rem;
+    }
+    @media (max-width: 720px) {
+      .layout { padding: 0.75rem; }
+      select { min-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <div>
+        <h1>Co-watcher</h1>
+        <div class="subtitle">Watch, ask out loud, get a spoiler-safe answer</div>
+      </div>
+      <div class="controls">
+        <label for="titleSelect">Title</label>
+        <select id="titleSelect" disabled>
+          <option value="">Loading titles…</option>
+        </select>
+      </div>
+    </header>
+
+    <section class="panel">
+      <video id="player" controls playsinline preload="metadata"></video>
+      <div class="toolbar">
+        <button id="micBtn" type="button" disabled>Hold to ask (mic)</button>
+        <button id="resumeBtn" type="button" disabled>Resume video</button>
+      </div>
+      <p class="hint">Hold <strong>Space</strong> or press and hold the mic button while you speak. The video pauses, your question is sent at the current timestamp, then playback resumes after the answer is spoken.</p>
+      <div id="status" class="status">Pick a title to start.</div>
+    </section>
+
+    <section class="panel transcript">
+      <div class="bubble">
+        <h3>Your question</h3>
+        <p id="questionText">—</p>
+      </div>
+      <div class="bubble">
+        <h3>Co-watcher</h3>
+        <p id="answerText">—</p>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const player = document.getElementById("player");
+    const titleSelect = document.getElementById("titleSelect");
+    const micBtn = document.getElementById("micBtn");
+    const resumeBtn = document.getElementById("resumeBtn");
+    const statusEl = document.getElementById("status");
+    const questionText = document.getElementById("questionText");
+    const answerText = document.getElementById("answerText");
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const synth = window.speechSynthesis;
+
+    const USER_ID = "web-viewer";
+
+    let recognition = null;
+    let listening = false;
+    let askInFlight = false;
+    let pausedForAsk = false;
+    let capturedTs = 0;
+    let finalTranscript = "";
+    let spaceHeld = false;
+    let micHeld = false;
+
+    function setStatus(text, kind = "") {
+      statusEl.textContent = text;
+      statusEl.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function speechSupported() {
+      return Boolean(SpeechRecognition) && Boolean(synth);
+    }
+
+    function setupRecognition() {
+      if (!SpeechRecognition) return null;
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = true;
+      rec.lang = "en-US";
+      rec.maxAlternatives = 1;
+
+      rec.onstart = () => {
+        listening = true;
+        micBtn.classList.add("listening");
+        setStatus("Listening… release when done speaking.", "ok");
+      };
+
+      rec.onresult = (event) => {
+        let interim = "";
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const result = event.results[i];
+          const text = result[0].transcript.trim();
+          if (!text) continue;
+          if (result.isFinal) {
+            finalTranscript = `${finalTranscript} ${text}`.trim();
+          } else {
+            interim = `${interim} ${text}`.trim();
+          }
+        }
+        const preview = (finalTranscript || interim || "").trim();
+        if (preview) questionText.textContent = preview;
+      };
+
+      rec.onerror = (event) => {
+        if (event.error === "no-speech") {
+          setStatus("Didn't catch speech — try again.", "error");
+        } else if (event.error !== "aborted") {
+          setStatus(`Speech error: ${event.error}`, "error");
+        }
+        cleanupListening();
+      };
+
+      rec.onend = async () => {
+        listening = false;
+        micBtn.classList.remove("listening");
+        const question = finalTranscript.trim();
+        finalTranscript = "";
+        if (!question) {
+          if (!askInFlight) {
+            setStatus("No speech detected.", "error");
+            maybeResumeAfterCancel();
+          }
+          return;
+        }
+        await submitQuestion(question);
+      };
+
+      return rec;
+    }
+
+    function cleanupListening() {
+      listening = false;
+      micBtn.classList.remove("listening");
+    }
+
+    function maybeResumeAfterCancel() {
+      if (pausedForAsk) {
+        player.play().catch(() => {});
+        pausedForAsk = false;
+        resumeBtn.disabled = true;
+      }
+    }
+
+    function speakAnswer(text) {
+      return new Promise((resolve) => {
+        if (!text || !synth) {
+          resolve();
+          return;
+        }
+        synth.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1;
+        utterance.onend = () => resolve();
+        utterance.onerror = () => resolve();
+        synth.speak(utterance);
+      });
+    }
+
+    async function submitQuestion(question) {
+      const titleId = titleSelect.value;
+      if (!titleId || askInFlight) return;
+
+      askInFlight = true;
+      micBtn.disabled = true;
+      questionText.textContent = question;
+      answerText.textContent = "…";
+      setStatus("Thinking…", "thinking");
+
+      try {
+        const response = await fetch("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title_id: titleId,
+            current_ts: capturedTs,
+            question,
+            user_id: USER_ID,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || "Ask request failed");
+        }
+        answerText.textContent = data.answer;
+        setStatus("Speaking answer…", "ok");
+        await speakAnswer(data.answer);
+        setStatus("Ready — hold Space or mic to ask again.", "ok");
+      } catch (err) {
+        answerText.textContent = "—";
+        setStatus(err.message || "Something went wrong.", "error");
+      } finally {
+        askInFlight = false;
+        micBtn.disabled = !titleSelect.value;
+        if (pausedForAsk) {
+          player.play().catch(() => {});
+          pausedForAsk = false;
+          resumeBtn.disabled = true;
+        }
+      }
+    }
+
+    function beginAsk() {
+      if (askInFlight || listening || !titleSelect.value) return;
+      if (!speechSupported()) {
+        setStatus("Speech recognition not supported — use Chrome.", "error");
+        return;
+      }
+
+      capturedTs = player.currentTime || 0;
+      if (!player.paused) {
+        player.pause();
+        pausedForAsk = true;
+        resumeBtn.disabled = false;
+      } else {
+        pausedForAsk = false;
+      }
+
+      finalTranscript = "";
+      questionText.textContent = "…";
+      answerText.textContent = "—";
+
+      try {
+        recognition.start();
+      } catch (err) {
+        setStatus("Could not start microphone — check permissions.", "error");
+        maybeResumeAfterCancel();
+      }
+    }
+
+    function endAsk() {
+      if (!listening || !recognition) return;
+      try {
+        recognition.stop();
+      } catch (_) {
+        cleanupListening();
+      }
+    }
+
+    async function loadTitles() {
+      try {
+        const response = await fetch("/titles");
+        if (!response.ok) throw new Error("Could not load titles");
+        const titles = await response.json();
+        titleSelect.innerHTML = "";
+        if (!titles.length) {
+          titleSelect.disabled = true;
+          titleSelect.innerHTML = '<option value="">No ingested titles yet</option>';
+          setStatus("Ingest a title first, then refresh this page.", "error");
+          return;
+        }
+        for (const title of titles) {
+          const option = document.createElement("option");
+          option.value = title.title_id;
+          const label = title.display_name || title.title_id;
+          option.textContent = `${label} (${title.scene_count} scenes)`;
+          titleSelect.appendChild(option);
+        }
+        titleSelect.disabled = false;
+        micBtn.disabled = !speechSupported();
+        if (!speechSupported()) {
+          setStatus("Use Chrome for voice input.", "error");
+        } else {
+          setStatus("Ready — pick a title and press play.", "ok");
+        }
+        onTitleChange();
+      } catch (err) {
+        titleSelect.innerHTML = '<option value="">Failed to load titles</option>';
+        setStatus(err.message, "error");
+      }
+    }
+
+    function onTitleChange() {
+      const titleId = titleSelect.value;
+      if (!titleId) {
+        player.removeAttribute("src");
+        player.load();
+        micBtn.disabled = true;
+        return;
+      }
+      player.src = `/video/${encodeURIComponent(titleId)}`;
+      player.load();
+      micBtn.disabled = !speechSupported();
+      setStatus(`Loaded ${titleId}. Press play, then hold Space or mic to ask.`, "ok");
+    }
+
+    micBtn.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      micHeld = true;
+      beginAsk();
+    });
+    micBtn.addEventListener("mouseup", () => {
+      micHeld = false;
+      endAsk();
+    });
+    micBtn.addEventListener("mouseleave", () => {
+      if (micHeld) {
+        micHeld = false;
+        endAsk();
+      }
+    });
+    micBtn.addEventListener("touchstart", (event) => {
+      event.preventDefault();
+      micHeld = true;
+      beginAsk();
+    }, { passive: false });
+    micBtn.addEventListener("touchend", (event) => {
+      event.preventDefault();
+      micHeld = false;
+      endAsk();
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (event.code !== "Space" || event.repeat) return;
+      const tag = (event.target && event.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      event.preventDefault();
+      if (!spaceHeld) {
+        spaceHeld = true;
+        beginAsk();
+      }
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (event.code !== "Space") return;
+      event.preventDefault();
+      spaceHeld = false;
+      endAsk();
+    });
+
+    resumeBtn.addEventListener("click", () => {
+      player.play().catch(() => {});
+      pausedForAsk = false;
+      resumeBtn.disabled = true;
+      synth.cancel();
+      setStatus("Playback resumed.", "ok");
+    });
+
+    titleSelect.addEventListener("change", onTitleChange);
+
+    recognition = setupRecognition();
+    loadTitles();
+  </script>
+</body>
+</html>

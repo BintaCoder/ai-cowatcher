@@ -1,10 +1,15 @@
 """Application configuration — all provider/model choices from environment."""
 
+import json
+import logging
+import re
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 WhisperModelSize = Literal["tiny", "base", "small", "medium", "large-v2", "large-v3"]
@@ -78,6 +83,9 @@ class Settings(BaseSettings):
     # ── Vision captioning (LiteLLM) ───────────────────────────────────────────
     vision_model: str = Field(default="gemini/gemini-2.0-flash-lite", alias="VISION_MODEL")
     vision_max_tokens: int = Field(default=256, alias="VISION_MAX_TOKENS")
+    vision_caption_delay_sec: float = Field(default=1.0, alias="VISION_CAPTION_DELAY_SEC")
+    vision_caption_max_retries: int = Field(default=8, alias="VISION_CAPTION_MAX_RETRIES")
+    vision_frame_max_size: int = Field(default=512, alias="VISION_FRAME_MAX_SIZE")
 
     # ── Conversation LLM (LiteLLM) ────────────────────────────────────────────
     llm_primary_model: str = Field(default="openai/gpt-4o-mini", alias="LLM_PRIMARY_MODEL")
@@ -113,6 +121,20 @@ class Settings(BaseSettings):
 
     # ── Real-time retrieval ─────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")
+
+    # ── Cast / actor lookup (TMDB) ────────────────────────────────────────────
+    # Public cast metadata is not a plot spoiler, so this is safe to expose.
+    tmdb_api_key: str = Field(default="", alias="TMDB_API_KEY")
+    tmdb_base_url: str = Field(default="https://api.themoviedb.org/3", alias="TMDB_BASE_URL")
+    tmdb_timeout_sec: float = Field(default=8.0, alias="TMDB_TIMEOUT_SEC")
+    tmdb_max_cast: int = Field(default=10, alias="TMDB_MAX_CAST")
+    # Intermittent TLS resets (ISP/middlebox filtering) are common for TMDB on some
+    # networks; retry transient connection failures before giving up.
+    tmdb_max_retries: int = Field(default=5, alias="TMDB_MAX_RETRIES")
+    tmdb_retry_backoff_sec: float = Field(default=0.5, alias="TMDB_RETRY_BACKOFF_SEC")
+    # JSON map of internal title_id -> human title used for TMDB search,
+    # e.g. {"demo": "Kids", "thriller-001": "Knives Out (2019)"}
+    title_names: str = Field(default="{}", alias="TITLE_NAMES")
 
     # ── Provider API keys ─────────────────────────────────────────────────────
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
@@ -171,6 +193,71 @@ class Settings(BaseSettings):
     def active_llm_model(self) -> str:
         """Default conversation tier (fast). Kept for backward compatibility."""
         return self.conversation_fast_model
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def cast_lookup_enabled(self) -> bool:
+        """Cast lookup is available only with a TMDB key and outside mock mode."""
+        return bool(self.tmdb_api_key) and not self.mock_mode
+
+    @property
+    def title_name_map(self) -> dict[str, str]:
+        try:
+            parsed = json.loads(self.title_names or "{}")
+        except json.JSONDecodeError:
+            logger.warning("TITLE_NAMES is not valid JSON; ignoring")
+            return {}
+        if not isinstance(parsed, dict):
+            logger.warning("TITLE_NAMES must be a JSON object; ignoring")
+            return {}
+        return {str(key): str(value) for key, value in parsed.items()}
+
+    def title_display_name(self, title_id: str) -> str | None:
+        return self.title_name_map.get(title_id)
+
+    def resolve_title_display_name(
+        self, title_id: str, db_display_name: str | None = None
+    ) -> str | None:
+        """Prefer DB display_name, fall back to TITLE_NAMES env map. May return None."""
+        if db_display_name:
+            return db_display_name
+        return self.title_display_name(title_id)
+
+    @staticmethod
+    def derive_title_from_id(title_id: str) -> str | None:
+        """Best-effort human title guessed from an internal title_id.
+
+        Examples: "Friends-1v" -> "Friends", "the_office_s01" -> "the office".
+        Used only as a fallback when no display_name / TITLE_NAMES entry exists,
+        so the cast lookup still has a reasonable term to search TMDB with.
+        """
+        if not title_id:
+            return None
+        tokens = re.split(r"[-_\s]+", title_id.strip())
+        kept: list[str] = []
+        for token in tokens:
+            low = token.lower()
+            if not low:
+                continue
+            if low.isdigit():
+                continue
+            # version / sequence markers: 1v, v1, s01, e01, 001, etc.
+            if re.fullmatch(r"[a-z]?\d+[a-z]?", low):
+                continue
+            if low in {"clip", "clips", "part", "ep", "episode", "season", "v", "vid", "video"}:
+                continue
+            kept.append(token)
+        guess = " ".join(kept).strip()
+        return guess or None
+
+    def effective_search_title(
+        self, title_id: str, db_display_name: str | None = None
+    ) -> str | None:
+        """Confident title (DB/env) if available, else a guess derived from title_id."""
+        resolved = self.resolve_title_display_name(title_id, db_display_name)
+        if resolved:
+            return resolved
+        return self.derive_title_from_id(title_id)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from ai_cowatcher import __version__
 from ai_cowatcher.api.ask_routes import router as ask_router
+from ai_cowatcher.api.watch_routes import router as watch_router
 from ai_cowatcher.api.metrics_routes import router as metrics_router
 from ai_cowatcher.api.routes import router as ingest_router
 from ai_cowatcher.config import Settings, get_settings
@@ -40,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(ingest_router)
     app.include_router(ask_router)
+    app.include_router(watch_router)
     app.include_router(metrics_router)
 
     @app.get("/")

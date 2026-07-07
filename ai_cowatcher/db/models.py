@@ -16,6 +16,7 @@ class TitleIngestion(Base):
     __tablename__ = "title_ingestions"
 
     title_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    display_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     video_path: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     scene_count: Mapped[int] = mapped_column(nullable=False, default=0)

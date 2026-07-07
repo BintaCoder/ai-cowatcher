@@ -6,11 +6,13 @@ import base64
 import logging
 import platform
 import subprocess
+import time
 from pathlib import Path
 
 import cv2
 import litellm
 import numpy as np
+from litellm.exceptions import RateLimitError
 from scenedetect import SceneManager, open_video
 from scenedetect.detectors import ContentDetector
 
@@ -168,13 +170,15 @@ class LiteLLMSceneCaptioner:
 
     def caption_scenes(self, video_path: str, scenes: list[SceneBoundary]) -> list[str]:
         captions: list[str] = []
-        for scene in scenes:
+        total = len(scenes)
+        for index, scene in enumerate(scenes):
             midpoint = (scene.start_ts + scene.end_ts) / 2.0
             frame = _read_frame_at(video_path, midpoint)
             if frame is None:
                 captions.append("")
                 continue
 
+            frame = _resize_frame_for_vision(frame, self._settings.vision_frame_max_size)
             ok, encoded = cv2.imencode(".jpg", frame)
             if not ok:
                 captions.append("")
@@ -185,7 +189,14 @@ class LiteLLMSceneCaptioner:
                 "Describe this TV scene in one or two concise sentences for a viewer "
                 "co-watcher assistant. Focus on visible action, characters, and setting."
             )
-            response = litellm.completion(
+            logger.info(
+                "Captioning scene %s (%d/%d) via %s",
+                scene.scene_id,
+                index + 1,
+                total,
+                self._settings.active_vision_model,
+            )
+            response = _vision_completion_with_retry(
                 model=self._settings.active_vision_model,
                 messages=[
                     {
@@ -200,8 +211,11 @@ class LiteLLMSceneCaptioner:
                     }
                 ],
                 max_tokens=self._settings.vision_max_tokens,
+                max_retries=self._settings.vision_caption_max_retries,
             )
             captions.append(response.choices[0].message.content.strip())
+            if index + 1 < total and self._settings.vision_caption_delay_sec > 0:
+                time.sleep(self._settings.vision_caption_delay_sec)
         return captions
 
 
@@ -228,6 +242,44 @@ class BgeM3Embedder:
         output = self._model.encode(texts, return_dense=True, return_sparse=False)
         dense = output["dense_vecs"]
         return [vector.tolist() for vector in dense]
+
+
+def _resize_frame_for_vision(frame, max_size: int):
+    height, width = frame.shape[:2]
+    if max(height, width) <= max_size:
+        return frame
+    scale = max_size / max(height, width)
+    new_width, new_height = int(width * scale), int(height * scale)
+    return cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+
+
+def _vision_completion_with_retry(
+    *,
+    model: str,
+    messages: list,
+    max_tokens: int,
+    max_retries: int,
+):
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return litellm.completion(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+        except RateLimitError as exc:
+            last_error = exc
+            wait_sec = min(60.0, 1.0 * (2**attempt))
+            logger.warning(
+                "Vision caption rate limited (attempt %d/%d), sleeping %.1fs",
+                attempt + 1,
+                max_retries,
+                wait_sec,
+            )
+            time.sleep(wait_sec)
+    assert last_error is not None
+    raise last_error
 
 
 def _insightface_providers() -> list[str] | None:
