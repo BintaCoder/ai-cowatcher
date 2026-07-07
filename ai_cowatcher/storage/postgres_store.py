@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ai_cowatcher.db.models import SceneEvent, TitleEvent, TitleIngestion
 from ai_cowatcher.domain import SceneEventRecord, TitleEventRecord
+from ai_cowatcher.observability.prometheus_metrics import observe_storage_query
 
 
 class SceneEventRepository:
@@ -19,7 +20,8 @@ class SceneEventRepository:
         return self._session.get(TitleIngestion, title_id)
 
     def get_display_name(self, title_id: str) -> str | None:
-        title = self.get_title(title_id)
+        with observe_storage_query("postgres", "get_display_name"):
+            title = self.get_title(title_id)
         if title is None or not title.display_name:
             return None
         return title.display_name
@@ -115,8 +117,9 @@ class SceneEventRepository:
 
     def save_scene_event(self, event: SceneEventRecord) -> None:
         """Persist a single enriched scene and commit immediately (resumable ingest)."""
-        self._merge_event(event)
-        self._session.commit()
+        with observe_storage_query("postgres", "save_scene_event"):
+            self._merge_event(event)
+            self._session.commit()
 
     def _merge_event(self, event: SceneEventRecord) -> None:
         row = SceneEvent(

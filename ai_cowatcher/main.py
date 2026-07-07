@@ -40,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Pay-TV co-watcher pilot API",
         lifespan=lifespan,
     )
+    app.state.settings = settings
 
     app.include_router(catalog_router)
     app.include_router(ingest_router)

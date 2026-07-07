@@ -28,6 +28,7 @@ dependencies = [
     "sqlalchemy==2.0.51",
     "neo4j==6.2.0",
     "langgraph==1.2.8",
+    "prometheus-client==0.21.1",
 ]
 
 [project.optional-dependencies]

@@ -9,6 +9,7 @@ from qdrant_client.http import models as qmodels
 
 from ai_cowatcher.config import Settings
 from ai_cowatcher.domain import SceneEventRecord, SceneLookupHit
+from ai_cowatcher.observability.prometheus_metrics import observe_storage_query
 
 
 class QdrantSceneStore:
@@ -127,13 +128,14 @@ class QdrantSceneStore:
 
         spoiler_filter = qmodels.Filter(must=must_filters)
 
-        results = self._client.query_points(
-            collection_name=self._collection,
-            query=query_vector,
-            query_filter=spoiler_filter,
-            limit=top_k,
-            with_payload=True,
-        ).points
+        with observe_storage_query("qdrant", "search_scenes"):
+            results = self._client.query_points(
+                collection_name=self._collection,
+                query=query_vector,
+                query_filter=spoiler_filter,
+                limit=top_k,
+                with_payload=True,
+            ).points
 
         hits = [
             SceneLookupHit(

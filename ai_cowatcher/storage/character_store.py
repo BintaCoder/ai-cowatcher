@@ -24,6 +24,7 @@ from ai_cowatcher.domain import (
     CharacterLookupResult,
     CharacterRelationship,
 )
+from ai_cowatcher.observability.prometheus_metrics import observe_storage_query
 
 logger = logging.getLogger(__name__)
 
@@ -168,14 +169,15 @@ class InMemoryCharacterStore:
     def character_lookup(
         self, title_id: str, key: str | None, current_ts: float
     ) -> CharacterLookupResult | None:
-        return resolve_lookup(
-            title_id,
-            self._characters.get(title_id, []),
-            self._appearances.get(title_id, []),
-            self._relationships.get(title_id, []),
-            key,
-            current_ts,
-        )
+        with observe_storage_query("memory", "character_lookup"):
+            return resolve_lookup(
+                title_id,
+                self._characters.get(title_id, []),
+                self._appearances.get(title_id, []),
+                self._relationships.get(title_id, []),
+                key,
+                current_ts,
+            )
 
     def close(self) -> None:  # noqa: D401 - nothing to release
         return None
@@ -271,10 +273,11 @@ class Neo4jCharacterStore:
     def character_lookup(
         self, title_id: str, key: str | None, current_ts: float
     ) -> CharacterLookupResult | None:
-        with self._driver.session(database=self._database) as session:
-            return session.execute_read(
-                self._read_lookup, title_id, key, current_ts
-            )
+        with observe_storage_query("neo4j", "character_lookup"):
+            with self._driver.session(database=self._database) as session:
+                return session.execute_read(
+                    self._read_lookup, title_id, key, current_ts
+                )
 
     @staticmethod
     def _read_lookup(tx, title_id, key, current_ts) -> CharacterLookupResult | None:

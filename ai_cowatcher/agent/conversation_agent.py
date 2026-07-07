@@ -19,6 +19,7 @@ from ai_cowatcher.agent.tools import (
     USER_MEMORY_TOOL,
 )
 from ai_cowatcher.config import Settings
+from ai_cowatcher.observability.prometheus_metrics import observe_tool_call
 from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
 from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
 from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
@@ -228,57 +229,62 @@ class ConversationAgent:
     ) -> tuple[Any, bool]:
         """Return (payload, used_context). payload is None for unsupported tools."""
         if tool_call.name == "user_memory" and self._user_memory is not None:
-            mode = str(tool_call.arguments.get("mode", "summary"))
-            max_turns = tool_call.arguments.get("max_turns")
-            result = self._user_memory.lookup(
-                user_id=user_id,
-                title_id=title_id,
-                mode=mode,
-                max_turns=int(max_turns) if isinstance(max_turns, (int, str)) and str(max_turns).isdigit() else None,
-            )
+            with observe_tool_call("user_memory"):
+                mode = str(tool_call.arguments.get("mode", "summary"))
+                max_turns = tool_call.arguments.get("max_turns")
+                result = self._user_memory.lookup(
+                    user_id=user_id,
+                    title_id=title_id,
+                    mode=mode,
+                    max_turns=int(max_turns) if isinstance(max_turns, (int, str)) and str(max_turns).isdigit() else None,
+                )
             return result, bool(result.get("found"))
 
         if tool_call.name == "scene_lookup":
-            query_text = str(tool_call.arguments.get("query_text", question))
-            hits = self._scene_lookup.lookup(
-                title_id=title_id,
-                query_text=query_text,
-                current_ts=current_ts,
-            )
+            with observe_tool_call("scene_lookup"):
+                query_text = str(tool_call.arguments.get("query_text", question))
+                hits = self._scene_lookup.lookup(
+                    title_id=title_id,
+                    query_text=query_text,
+                    current_ts=current_ts,
+                )
             return [hit.to_tool_dict() for hit in hits], bool(hits)
 
         if tool_call.name == "character_lookup" and self._character_lookup is not None:
-            character = tool_call.arguments.get("character")
-            result = self._character_lookup.lookup(
-                title_id=title_id,
-                character=str(character) if character else None,
-                current_ts=current_ts,
-            )
+            with observe_tool_call("character_lookup"):
+                character = tool_call.arguments.get("character")
+                result = self._character_lookup.lookup(
+                    title_id=title_id,
+                    character=str(character) if character else None,
+                    current_ts=current_ts,
+                )
             used = bool(result.get("found") and result.get("appearances"))
             return result, used
 
         if tool_call.name == "cast_lookup" and self._cast_lookup is not None:
-            title_name = (
-                str(tool_call.arguments.get("title_name", ""))
-                or search_title
-                or self._settings.effective_search_title(title_id)
-                or ""
-            )
-            year = tool_call.arguments.get("year")
-            result = self._cast_lookup.lookup(
-                title_name=title_name,
-                year=int(year) if isinstance(year, (int, str)) and str(year).isdigit() else None,
-            )
+            with observe_tool_call("cast_lookup"):
+                title_name = (
+                    str(tool_call.arguments.get("title_name", ""))
+                    or search_title
+                    or self._settings.effective_search_title(title_id)
+                    or ""
+                )
+                year = tool_call.arguments.get("year")
+                result = self._cast_lookup.lookup(
+                    title_name=title_name,
+                    year=int(year) if isinstance(year, (int, str)) and str(year).isdigit() else None,
+                )
             return result, bool(result.get("cast"))
 
         if tool_call.name == "knowledge_search" and self._knowledge_search is not None:
-            query_text = str(tool_call.arguments.get("query_text", question))
-            category = tool_call.arguments.get("category")
-            hits = self._knowledge_search.search(
-                title_id=title_id,
-                query_text=query_text,
-                category=str(category) if category else None,
-            )
+            with observe_tool_call("knowledge_search"):
+                query_text = str(tool_call.arguments.get("query_text", question))
+                category = tool_call.arguments.get("category")
+                hits = self._knowledge_search.search(
+                    title_id=title_id,
+                    query_text=query_text,
+                    category=str(category) if category else None,
+                )
             return [hit.to_tool_dict() for hit in hits], bool(hits)
 
         return None, False

@@ -160,6 +160,10 @@ class Settings(BaseSettings):
         default="cowatcher-ingest", alias="KAFKA_CONSUMER_GROUP"
     )
 
+    # ── Prometheus / Grafana observability ──────────────────────────────────────
+    prometheus_enabled: bool = Field(default=True, alias="PROMETHEUS_ENABLED")
+    worker_metrics_port: int = Field(default=9100, alias="WORKER_METRICS_PORT")
+
     # ── User conversation memory ────────────────────────────────────────────────
     user_memory_max_turns: int = Field(default=10, alias="USER_MEMORY_MAX_TURNS")
     user_memory_cache_turns: int = Field(default=20, alias="USER_MEMORY_CACHE_TURNS")

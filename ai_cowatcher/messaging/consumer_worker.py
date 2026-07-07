@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import time
 from typing import Callable
 
 from sqlalchemy.orm import sessionmaker
@@ -14,6 +15,8 @@ from ai_cowatcher.ingestion.pipeline import run_ingestion
 from ai_cowatcher.messaging.base import BrokerMessage, IngestEventConsumer
 from ai_cowatcher.messaging.events import IngestTitleEvent
 from ai_cowatcher.messaging.factory import build_ingest_consumer
+from ai_cowatcher.observability.prometheus_metrics import record_ingest_job, set_ingest_queue_depth
+from ai_cowatcher.observability.queue_depth import probe_ingest_queue_depth
 from ai_cowatcher.storage.postgres_store import SceneEventRepository
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,7 @@ class IngestConsumerWorker:
                 event.title_id,
                 event.event_id,
             )
+            record_ingest_job(status="skipped", duration_sec=0.0)
             return
 
         logger.info(
@@ -62,12 +66,16 @@ class IngestConsumerWorker:
             event.title_id,
             event.attempt,
         )
-        self._run_ingestion(
+        started = time.perf_counter()
+        result = self._run_ingestion(
             event.title_id,
             event.video_path,
             force=event.force,
             display_name=event.display_name,
         )
+        duration = time.perf_counter() - started
+        scenes = getattr(result, "newly_processed", 0) or 0
+        record_ingest_job(status="completed", duration_sec=duration, scenes_processed=scenes)
 
     def process_message(self, message: BrokerMessage) -> None:
         self.handle_event(message.event)
@@ -83,10 +91,15 @@ class IngestConsumerWorker:
                 "Ingest failed for title %s; nacking for retry",
                 message.event.title_id,
             )
+            record_ingest_job(status="failed", duration_sec=0.0)
             self._consumer.nack(message, requeue=True)
             return True
         self._consumer.ack(message)
         return True
+
+    def _update_queue_depth(self) -> None:
+        depth = probe_ingest_queue_depth(self._settings)
+        set_ingest_queue_depth(self._settings.message_broker, depth)
 
     def run_forever(self, *, poll_timeout_sec: float = 1.0) -> None:
         def _stop(_signum: int, _frame: object) -> None:
@@ -101,6 +114,7 @@ class IngestConsumerWorker:
             self._settings.message_broker,
         )
         while self._running:
+            self._update_queue_depth()
             self.run_once(timeout_sec=poll_timeout_sec)
         self._consumer.close()
         logger.info("Ingest worker stopped")

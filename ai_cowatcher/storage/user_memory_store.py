@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ai_cowatcher.config import Settings
 from ai_cowatcher.db.models import UserConversationTurn
 from ai_cowatcher.domain import ConversationTurnRecord
+from ai_cowatcher.observability.prometheus_metrics import observe_storage_query
 
 logger = logging.getLogger(__name__)
 
@@ -203,17 +204,19 @@ class UserMemoryStore:
         self, user_id: str, title_id: str, *, max_turns: int | None = None
     ) -> list[ConversationTurnRecord]:
         limit = max_turns or self._settings.user_memory_max_turns
-        try:
-            cached = self._cache.get_recent(user_id, title_id)
-            if cached is not None:
-                return cached[-limit:]
-        except Exception:  # noqa: BLE001
-            logger.exception("User memory cache read failed for %s/%s", user_id, title_id)
+        with observe_storage_query("redis", "get_recent_turns"):
+            try:
+                cached = self._cache.get_recent(user_id, title_id)
+                if cached is not None:
+                    return cached[-limit:]
+            except Exception:  # noqa: BLE001
+                logger.exception("User memory cache read failed for %s/%s", user_id, title_id)
 
-        with self._session_factory() as session:
-            turns = UserMemoryRepository(session).list_recent_turns(
-                user_id, title_id, limit=limit
-            )
+        with observe_storage_query("postgres", "list_recent_turns"):
+            with self._session_factory() as session:
+                turns = UserMemoryRepository(session).list_recent_turns(
+                    user_id, title_id, limit=limit
+                )
         try:
             self._cache.set_recent(user_id, title_id, turns)
         except Exception:  # noqa: BLE001

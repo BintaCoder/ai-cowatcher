@@ -9,6 +9,7 @@ from qdrant_client.http import models as qmodels
 
 from ai_cowatcher.config import Settings
 from ai_cowatcher.domain import KnowledgeChunkRecord, KnowledgeSearchHit
+from ai_cowatcher.observability.prometheus_metrics import observe_storage_query
 
 
 class QdrantKnowledgeStore:
@@ -129,13 +130,14 @@ class QdrantKnowledgeStore:
                 )
             )
 
-        results = self._client.query_points(
-            collection_name=self._collection,
-            query=query_vector,
-            query_filter=qmodels.Filter(must=must_filters),
-            limit=top_k,
-            with_payload=True,
-        ).points
+        with observe_storage_query("qdrant", "search_knowledge"):
+            results = self._client.query_points(
+                collection_name=self._collection,
+                query=query_vector,
+                query_filter=qmodels.Filter(must=must_filters),
+                limit=top_k,
+                with_payload=True,
+            ).points
 
         return [
             KnowledgeSearchHit(

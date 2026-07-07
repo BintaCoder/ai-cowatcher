@@ -7,7 +7,7 @@ Pay-TV co-watcher pilot — an AI companion that answers viewer questions about 
 - **Offline ingestion** (once per title): scene detection, transcription, face clustering, vision captioning, and vector indexing into Postgres + Qdrant.
 - **Real-time Q&A** (per question): a single orchestrating conversation agent with `scene_lookup` tool-calling; spoiler safety enforced via `end_ts <= current_ts` at retrieval time only.
 - **Tiered LLM routing**: fast model by default, escalated model for nuanced questions (config-driven).
-- **Pilot observability**: structured JSON logs per `/ask` and `GET /metrics-lite` for latency, escalation rate, and "don't know" rate.
+- **Pilot observability**: structured JSON logs per `/ask`, `GET /metrics-lite` rollups, and Prometheus + Grafana (`GET /metrics`, dashboard at `:3000`).
 
 ## Quick start
 
@@ -30,6 +30,18 @@ With `MOCK_MODE=true` (default), AI providers use local mocks — no API keys re
 | `POST /ingest` | Publish an ingest event for an existing or new title |
 | `POST /ask` | Real-time co-watcher Q&A |
 | `GET /metrics-lite` | Pilot KPIs (latency, escalation, don't-know rate) |
+| `GET /metrics` | Prometheus scrape endpoint |
+
+## Observability
+
+```bash
+make up                    # includes Prometheus (:9090) and Grafana (:3000)
+make api                   # exposes GET /metrics on :8000
+make worker                # ingest worker metrics on :9100/metrics
+```
+
+Grafana login: `admin` / `cowatcher`. Dashboard: **AI Co-watcher Pilot**.  
+Alert thresholds (documented, not paged): see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 ## CLI
 
