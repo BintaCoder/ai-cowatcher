@@ -42,3 +42,15 @@ def _apply_lightweight_migrations(engine) -> None:
                 "ADD COLUMN IF NOT EXISTS display_name VARCHAR(512)"
             )
         )
+        conn.execute(
+            text(
+                "ALTER TABLE title_ingestions "
+                "ADD COLUMN IF NOT EXISTS credits_start_ts DOUBLE PRECISION"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE scene_events "
+                "ADD COLUMN IF NOT EXISTS speaker_cluster_ids JSONB DEFAULT '[]'::jsonb"
+            )
+        )

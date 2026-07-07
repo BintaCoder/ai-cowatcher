@@ -43,6 +43,23 @@ services:
       timeout: 5s
       retries: 10
 
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: cowatcher-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/cowatcher
+      NEO4J_PLUGINS: '[]'
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     container_name: cowatcher-minio
@@ -65,4 +82,5 @@ volumes:
   postgres_data:
   redis_data:
   qdrant_data:
+  neo4j_data:
   minio_data:

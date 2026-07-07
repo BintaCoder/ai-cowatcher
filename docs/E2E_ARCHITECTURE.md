@@ -12,9 +12,10 @@
 AI Co-watcher is a **spoiler-safe TV companion**. It works in two phases:
 
 1. **Offline ingestion (once per title)** — Detect scenes, transcribe audio, detect faces, caption frames with a vision LLM, embed text, and index everything in **PostgreSQL + Qdrant**.
-2. **Real-time Q&A (per viewer question)** — A conversation agent calls `scene_lookup` (semantic search with `end_ts ≤ current_ts` spoiler guard) and optionally `cast_lookup` (TMDB public cast metadata). Answers are short and conversational.
+2. **Real-time Q&A (per viewer question)** — A conversation agent calls `scene_lookup` (semantic search with `end_ts ≤ current_ts` spoiler guard), `character_lookup` (spoiler-safe character intelligence from Neo4j), and optionally `cast_lookup` (TMDB public cast metadata). Answers are short and conversational.
+3. **Navigation (jump playback)** — `POST /navigate` resolves “go to 10:00”, “2nd fight”, “credits”, or “where does X appear” to a `seek_to_ts`. Uses indexed `title_events` (sports, fights, actor appearances, credits) plus full-title semantic search **without** the spoiler filter.
 
-A **watch webpage** (`GET /watch`) plays the ingested video, captures voice questions (browser STT), pauses playback, calls `/ask`, speaks the answer (browser TTS), and resumes.
+A **watch webpage** (`GET /watch`) plays the ingested video, captures voice questions (browser STT), routes navigation questions to `/navigate` (seek + TTS) or Q&A to `/ask` (pause, answer, resume).
 
 ---
 
@@ -31,10 +32,12 @@ flowchart TB
 
     subgraph API["ai-cowatcher API (FastAPI + Uvicorn)"]
         ASK["POST /ask"]
+        NAV["POST /navigate"]
         INGEST["POST /ingest"]
         STREAM["GET /video/{title_id}"]
         AGENT["ConversationAgent"]
         LOOKUP["scene_lookup tool"]
+        NAVTOOL["scene_navigate + event_lookup"]
         CAST["cast_lookup tool"]
     end
 
@@ -49,7 +52,7 @@ flowchart TB
     end
 
     subgraph Data["Data stores (Docker / local)"]
-        PG[("PostgreSQL\nscene events + title metadata")]
+        PG[("PostgreSQL\nscene events + title_events")]
         QD[("Qdrant\n1024-d vectors")]
         FS["Local video files\n(video_path in DB)"]
     end
@@ -63,10 +66,14 @@ flowchart TB
     WATCH --> VIDEO
     WATCH --> STT
     WATCH --> ASK
+    WATCH --> NAV
     ASK --> AGENT
+    NAV --> NAVTOOL
     AGENT --> LOOKUP
     AGENT --> CAST
     LOOKUP --> QD
+    NAVTOOL --> QD
+    NAVTOOL --> PG
     LOOKUP --> EMBED
     CAST --> TMDB
     AGENT --> OPENAI
@@ -121,6 +128,9 @@ sequenceDiagram
         Pipe->>QD: upsert vector + payload
         Pipe->>PG: save_scene_event (commit)
     end
+
+    Pipe->>Pipe: index_navigation_events (sports, fights, actors, credits)
+    Pipe->>PG: replace_title_events + credits_start_ts
 
     Pipe->>PG: mark_completed(scene_count)
     Pipe-->>CLI: IngestionResult
@@ -190,17 +200,133 @@ sequenceDiagram
 
 ---
 
+## 4b. Sequence diagram — navigation (watch flow)
+
+When the viewer asks to **jump** (“go to 10:00”, “2nd fight”, “credits”, “where does Ross appear”), the watch UI calls `POST /navigate` instead of `/ask`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Viewer
+    participant UI as /watch page
+    participant STT as Browser SpeechRecognition
+    participant API as POST /navigate
+    participant NS as NavigationSession
+    participant NR as NavigationResolver
+    participant EL as event_lookup
+    participant SN as scene_navigate
+    participant BGE as BGE-M3 (local)
+    participant QD as Qdrant
+    participant PG as PostgreSQL
+    participant TTS as SpeechSynthesis
+
+    Viewer->>UI: "Take me to the second fight"
+    UI->>UI: detect navigation intent
+    UI->>API: {title_id, current_ts, question}
+    API->>NS: navigate(...)
+    NS->>NR: resolve(question)
+
+    alt Absolute time ("go to 10:00")
+        NR-->>NS: seek_to_ts (parsed seconds)
+    else Indexed event ("2nd fight", credits, actor)
+        NR->>EL: lookup(event_type, ordinal)
+        EL->>PG: title_events
+        PG-->>EL: ranked events
+        EL-->>NR: TitleEventRecord
+        NR-->>NS: seek_to_ts = event.start_ts
+    else Semantic scene
+        NR->>SN: navigate(query, ordinal)
+        SN->>BGE: embed query
+        SN->>QD: search full title (spoiler_safe=false)
+        QD-->>SN: scenes sorted by time
+        SN-->>NR: Nth hit if ordinal
+        NR-->>NS: seek_to_ts = scene.start_ts
+    end
+
+    NS-->>API: NavigateResult
+    API-->>UI: {answer, seek_to_ts}
+    UI->>UI: player.currentTime = seek_to_ts
+    UI->>TTS: speak short confirmation
+```
+
+**Navigation vs Q&A:** navigation allows forward jumps across the full title; Q&A keeps the spoiler guard.
+
+---
+
+## 4c. Character intelligence (offline enrichment + `character_lookup`)
+
+Character intelligence is a **tool the single conversation agent can call**, not a
+separate agent. The orchestrator decides — in the same reasoning pass — whether a
+question needs `scene_lookup`, `character_lookup`, `cast_lookup`, or a combination.
+
+### Offline: speaker diarization + LangGraph enrichment
+
+During ingest, **pyannote.audio** speaker diarization runs alongside **InsightFace**
+face clustering, so each `SceneEvent` records both the active `face_cluster_ids` and
+`speaker_cluster_ids`. After scenes are persisted, a **LangGraph** graph builds the
+character graph in **Neo4j**:
+
+```mermaid
+flowchart LR
+    LOAD["load_scenes\n(Postgres)"] --> LINK["link_identities\nface + speaker → character"]
+    LINK --> NAME["resolve_names\n(cast metadata, best-effort)"]
+    NAME --> REL["build_relationships\nappearances + MET/relationship, timestamped"]
+    REL --> PERSIST["persist_graph → Neo4j"]
+```
+
+Neo4j model (every edge/appearance is timestamped):
+
+- `(:Character {id, name, face_cluster_ids, speaker_cluster_ids, first_ts})`
+- `(:Character)-[:APPEARS_IN {start_ts, end_ts}]->(:Scene)`
+- `(:Character)-[:RELATIONSHIP {rel_type, summary, known_since_ts, scene_id}]->(:Character)`
+
+`known_since_ts` is the **spoiler anchor**: the earliest playback position at which a
+relationship is revealed (first shared scene, or the scene whose dialogue states it,
+e.g. "you're my sister").
+
+### Real-time: spoiler-safe `character_lookup`
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Viewer
+    participant Agent as ConversationAgent (single pass)
+    participant CL as character_lookup
+    participant N4J as Neo4j
+
+    Viewer->>Agent: "Have I seen him before?"
+    Agent->>CL: character_lookup(character="", current_ts)
+    CL->>N4J: MATCH appearances WHERE start_ts <= current_ts\nMATCH relationships WHERE known_since_ts <= current_ts
+    N4J-->>CL: on-screen character + past appearances + revealed relationships
+    CL-->>Agent: spoiler-safe result
+    Agent-->>Viewer: "Yes, you've seen them earlier." (+ relationship only if revealed)
+```
+
+**Spoiler safety** is enforced identically to `scene_lookup`: the Neo4j query only
+returns appearances and relationships with `timestamp <= current_ts`. An empty
+`character` argument resolves to whoever is currently on screen (models "him"/"her").
+Asking *"have I seen him before?"* before two characters' relationship is revealed
+returns the prior appearances **without** the relationship; the same question after
+the reveal surfaces it.
+
+---
+
 ## 5. Service & component inventory
 
 ### 5.1 Application services (this repo)
 
 | Component | Role | Used in E2E? |
 |-----------|------|--------------|
-| **FastAPI + Uvicorn** | HTTP API (`/ask`, `/ingest`, `/watch`, `/titles`, `/video`) | Yes |
+| **FastAPI + Uvicorn** | HTTP API (`/ask`, `/navigate`, `/ingest`, `/watch`, `/titles`, `/video`) | Yes |
 | **IngestionPipeline** | Offline enrich + index | Yes |
 | **ConversationAgent** | Tool-calling LLM orchestrator | Yes |
 | **ViewingSession** | `/ask` coordinator + telemetry | Yes |
 | **SceneLookupTool** | Semantic retrieval + spoiler filter | Yes |
+| **CharacterLookupTool** | Spoiler-safe character intelligence (Neo4j) | Yes |
+| **CharacterGraph (LangGraph)** | Offline face+speaker → character enrichment | Yes (offline) |
+| **SceneNavigateTool** | Full-title semantic search (no spoiler filter) | Yes |
+| **EventLookupTool** | Indexed sports / fight / credits / actor events | Yes |
+| **NavigationResolver** | Deterministic seek resolution (time, ordinal, events) | Yes |
 | **CastLookupTool** | TMDB cast search | Optional |
 | **LiteLLM** | Unified LLM router (OpenAI, Gemini, Anthropic) | Yes |
 
@@ -208,8 +334,9 @@ sequenceDiagram
 
 | Service | Image | Role in pilot | Billing |
 |---------|-------|---------------|---------|
-| **PostgreSQL 16** | `postgres:16-alpine` | Title metadata, scene events, `display_name` | **Free** (self-hosted) |
+| **PostgreSQL 16** | `postgres:16-alpine` | Title metadata, scene events, `title_events`, `credits_start_ts`, `display_name` | **Free** (self-hosted) |
 | **Qdrant 1.12** | `qdrant/qdrant:v1.12.5` | Vector search (BGE-M3, 1024-d, cosine) | **Free** (self-hosted); paid if Qdrant Cloud |
+| **Neo4j 5** | `neo4j:5.26-community` | Character intelligence graph (identities, appearances, relationships) | **Free** (self-hosted); paid if Aura |
 | **Redis 7** | `redis:7-alpine` | Health check only (not in hot path yet) | **Free** (self-hosted) |
 | **MinIO** | `minio/minio` | Provisioned; **not used** in current code path | **Free** (self-hosted); videos use local `video_path` |
 
@@ -221,6 +348,7 @@ sequenceDiagram
 | **FFmpeg** | Audio extraction | **Free** |
 | **faster-whisper** | Speech-to-text (ingest) | **Free** (local CPU/MPS) |
 | **InsightFace** (`buffalo_l`) | Face detection / clustering | **Free** (local, ONNX) |
+| **pyannote.audio** | Speaker diarization (ingest) | **Free** (local; gated HF model) |
 | **BGE-M3** (`BAAI/bge-m3`) | Text embeddings (1024-d) | **Free** (local, Hugging Face weights) |
 | **OpenCV** | Frame grab at scene midpoint | **Free** |
 

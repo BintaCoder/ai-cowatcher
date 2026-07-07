@@ -17,7 +17,7 @@ from scenedetect import SceneManager, open_video
 from scenedetect.detectors import ContentDetector
 
 from ai_cowatcher.config import Settings
-from ai_cowatcher.domain import SceneBoundary
+from ai_cowatcher.domain import SceneBoundary, SpeakerSegment
 from ai_cowatcher.ingestion.transcription import TranscriptSegment
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,38 @@ class FasterWhisperTranscriber:
             clip_timestamps=(start_ts, end_ts),
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+
+class PyannoteDiarizer:
+    """Speaker diarization via pyannote.audio (offline pipeline only).
+
+    Loaded lazily because it pulls in torch. Requires a Hugging Face access
+    token with access to the gated diarization model.
+    """
+
+    def __init__(self, settings: Settings):
+        from pyannote.audio import Pipeline
+
+        token = settings.huggingface_token or None
+        logger.info("Loading pyannote diarization pipeline=%s", settings.diarization_model)
+        self._pipeline = Pipeline.from_pretrained(
+            settings.diarization_model,
+            use_auth_token=token,
+        )
+
+    def diarize(self, audio_path: str) -> list[SpeakerSegment]:
+        annotation = self._pipeline(audio_path)
+        segments: list[SpeakerSegment] = []
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
+            segments.append(
+                SpeakerSegment(
+                    start_ts=float(turn.start),
+                    end_ts=float(turn.end),
+                    speaker_label=str(speaker),
+                )
+            )
+        segments.sort(key=lambda seg: (seg.start_ts, seg.end_ts))
+        return segments
 
 
 class InsightFaceAnalyzer:

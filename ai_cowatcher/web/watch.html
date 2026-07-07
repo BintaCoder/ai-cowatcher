@@ -127,6 +127,15 @@
       gap: 0.5rem;
       flex-wrap: wrap;
       margin-top: 0.75rem;
+      align-items: center;
+    }
+    .nav-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+      user-select: none;
     }
     @media (max-width: 720px) {
       .layout { padding: 0.75rem; }
@@ -154,8 +163,9 @@
       <div class="toolbar">
         <button id="micBtn" type="button" disabled>Hold to ask (mic)</button>
         <button id="resumeBtn" type="button" disabled>Resume video</button>
+        <label class="nav-toggle"><input id="navigationMode" type="checkbox" checked /> Navigate mode (jump to moments)</label>
       </div>
-      <p class="hint">Hold <strong>Space</strong> or press and hold the mic button while you speak. The video pauses, your question is sent at the current timestamp, then playback resumes after the answer is spoken.</p>
+      <p class="hint">Hold <strong>Space</strong> or press and hold the mic button while you speak. Ask questions normally, or say <strong>"take me to 10 minutes"</strong>, <strong>"second fight"</strong>, <strong>"first goal"</strong>, <strong>"credits"</strong>, or <strong>"where does [actor] appear"</strong> to jump.</p>
       <div id="status" class="status">Pick a title to start.</div>
     </section>
 
@@ -176,6 +186,7 @@
     const titleSelect = document.getElementById("titleSelect");
     const micBtn = document.getElementById("micBtn");
     const resumeBtn = document.getElementById("resumeBtn");
+    const navigationMode = document.getElementById("navigationMode");
     const statusEl = document.getElementById("status");
     const questionText = document.getElementById("questionText");
     const answerText = document.getElementById("answerText");
@@ -184,6 +195,27 @@
     const synth = window.speechSynthesis;
 
     const USER_ID = "web-viewer";
+    const NAV_INTENT_RE = /\b(go to|jump to|skip to|take me to|show me|find|where does|where is|when does)\b/i;
+
+    function isNavigationQuestion(question) {
+      if (navigationMode && navigationMode.checked) {
+        if (NAV_INTENT_RE.test(question)) return true;
+        if (/\b(first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(goal|fight|point|six|wicket|touchdown)\b/i.test(question)) return true;
+        if (/\b(credits?|post[- ]credits?)\b/i.test(question)) return true;
+        if (/\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(question)) return true;
+        if (/\b\d+(?:\.\d+)?\s*(?:minutes?|mins?|hours?|hrs?)\b/i.test(question)) return true;
+        if (/\b(airplane|plane|crash)\b/i.test(question)) return true;
+      }
+      return NAV_INTENT_RE.test(question);
+    }
+
+    function applySeek(seekToTs) {
+      if (seekToTs == null || Number.isNaN(seekToTs)) return;
+      player.currentTime = Math.max(0, seekToTs);
+      player.play().catch(() => {});
+      pausedForAsk = false;
+      resumeBtn.disabled = true;
+    }
 
     let recognition = null;
     let listening = false;
@@ -292,14 +324,16 @@
       const titleId = titleSelect.value;
       if (!titleId || askInFlight) return;
 
+      let navigate = isNavigationQuestion(question);
       askInFlight = true;
       micBtn.disabled = true;
       questionText.textContent = question;
       answerText.textContent = "…";
-      setStatus("Thinking…", "thinking");
+      setStatus(navigate ? "Finding that moment…" : "Thinking…", "thinking");
 
       try {
-        const response = await fetch("/ask", {
+        const endpoint = navigate ? "/navigate" : "/ask";
+        const response = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -311,9 +345,16 @@
         });
         const data = await response.json();
         if (!response.ok) {
-          throw new Error(data.detail || "Ask request failed");
+          throw new Error(data.detail || `${navigate ? "Navigate" : "Ask"} request failed`);
         }
         answerText.textContent = data.answer;
+        if (navigate && data.seek_to_ts != null) {
+          applySeek(data.seek_to_ts);
+          setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
+          await speakAnswer(data.answer);
+          setStatus("Ready — hold Space or mic.", "ok");
+          return;
+        }
         setStatus("Speaking answer…", "ok");
         await speakAnswer(data.answer);
         setStatus("Ready — hold Space or mic to ask again.", "ok");
@@ -323,12 +364,21 @@
       } finally {
         askInFlight = false;
         micBtn.disabled = !titleSelect.value;
-        if (pausedForAsk) {
+        if (pausedForAsk && !navigate) {
           player.play().catch(() => {});
           pausedForAsk = false;
           resumeBtn.disabled = true;
         }
       }
+    }
+
+    function _formatTs(seconds) {
+      const total = Math.floor(seconds);
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const secs = total % 60;
+      if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+      return `${minutes}:${String(secs).padStart(2, "0")}`;
     }
 
     function beginAsk() {

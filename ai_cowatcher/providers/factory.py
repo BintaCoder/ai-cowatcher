@@ -10,6 +10,7 @@ from ai_cowatcher.interfaces import (
     FaceAnalyzer,
     SceneCaptioner,
     SceneDetector,
+    SpeakerDiarizer,
     TextEmbedder,
     Transcriber,
 )
@@ -21,6 +22,7 @@ class IngestionProviders:
     scene_detector: SceneDetector
     audio_extractor: AudioExtractor
     transcriber: Transcriber
+    speaker_diarizer: SpeakerDiarizer
     face_analyzer: FaceAnalyzer
     captioner: SceneCaptioner
     embedder: TextEmbedder
@@ -32,6 +34,7 @@ def build_ingestion_providers(settings: Settings) -> IngestionProviders:
             scene_detector=mock.MockSceneDetector(),
             audio_extractor=mock.MockAudioExtractor(),
             transcriber=mock.MockTranscriber(),
+            speaker_diarizer=mock.MockSpeakerDiarizer(),
             face_analyzer=mock.MockFaceAnalyzer(),
             captioner=mock.MockSceneCaptioner(),
             embedder=mock.MockTextEmbedder(),
@@ -41,6 +44,7 @@ def build_ingestion_providers(settings: Settings) -> IngestionProviders:
         scene_detector=real.PySceneDetectDetector(),
         audio_extractor=real.FFmpegAudioExtractor(settings),
         transcriber=real.FasterWhisperTranscriber(settings),
+        speaker_diarizer=real.PyannoteDiarizer(settings),
         face_analyzer=real.InsightFaceAnalyzer(settings),
         captioner=real.LiteLLMSceneCaptioner(settings),
         embedder=real.BgeM3Embedder(settings),

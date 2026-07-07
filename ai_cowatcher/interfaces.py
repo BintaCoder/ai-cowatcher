@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ai_cowatcher.domain import SceneBoundary
+from ai_cowatcher.domain import SceneBoundary, SpeakerSegment
 
 
 class SceneDetector(Protocol):
@@ -19,6 +19,11 @@ class AudioExtractor(Protocol):
 
 class Transcriber(Protocol):
     def transcribe_window(self, audio_path: str, start_ts: float, end_ts: float) -> str:
+        ...
+
+
+class SpeakerDiarizer(Protocol):
+    def diarize(self, audio_path: str) -> list[SpeakerSegment]:
         ...
 
 

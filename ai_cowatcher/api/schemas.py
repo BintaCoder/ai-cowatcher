@@ -33,3 +33,21 @@ class AskResponse(BaseModel):
     model_name: str
     escalation_reason: str
 
+
+class NavigateRequest(BaseModel):
+    title_id: str = Field(..., min_length=1, max_length=128)
+    current_ts: float = Field(..., ge=0.0)
+    question: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1, max_length=128)
+
+
+class NavigateResponseSchema(BaseModel):
+    answer: str
+    title_id: str
+    user_id: str
+    current_ts: float
+    seek_to_ts: float | None = None
+    scene_id: str | None = None
+    event_type: str | None = None
+    navigation_mode: str
+

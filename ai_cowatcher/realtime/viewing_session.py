@@ -14,8 +14,12 @@ from ai_cowatcher.observability.ask_telemetry import AskRecord, is_dont_know_ans
 from ai_cowatcher.providers import mock
 from ai_cowatcher.providers.real import BgeM3Embedder
 from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
+from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
+from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
 from ai_cowatcher.retrieval.scene_lookup import SceneLookupTool
+from ai_cowatcher.storage.character_store import CharacterStore, build_character_store
 from ai_cowatcher.storage.postgres_store import SceneEventRepository
+from ai_cowatcher.storage.qdrant_knowledge_store import QdrantKnowledgeStore
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 from sqlalchemy.orm import sessionmaker
 
@@ -120,12 +124,18 @@ def build_viewing_session(
     embedder: TextEmbedder | None = None,
     completion_client: CompletionClient | None = None,
     session_factory: sessionmaker | None = None,
+    character_store: CharacterStore | None = None,
+    knowledge_store: QdrantKnowledgeStore | None = None,
 ) -> ViewingSession:
     settings = settings or get_settings()
     qdrant = qdrant_store or QdrantSceneStore(settings)
+    knowledge_qdrant = knowledge_store or QdrantKnowledgeStore(settings)
     embedder = embedder or _build_embedder(settings)
     scene_lookup = SceneLookupTool(embedder, qdrant, settings)
+    knowledge_search = KnowledgeSearchTool(embedder, knowledge_qdrant, settings)
     cast_lookup = CastLookupTool(settings) if settings.cast_lookup_enabled else None
+    store = character_store or build_character_store(settings)
+    character_lookup = CharacterLookupTool(store)
     if session_factory is None:
         engine = create_db_engine(settings=settings)
         init_database(engine=engine, settings=settings)
@@ -135,5 +145,7 @@ def build_viewing_session(
         scene_lookup,
         completion_client=completion_client,
         cast_lookup=cast_lookup,
+        character_lookup=character_lookup,
+        knowledge_search=knowledge_search,
     )
     return ViewingSession(agent, settings, session_factory=session_factory)

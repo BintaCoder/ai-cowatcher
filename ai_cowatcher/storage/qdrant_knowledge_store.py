@@ -1,4 +1,4 @@
-"""Qdrant vector persistence for scene events."""
+"""Qdrant persistence for the curated title knowledge base (RAG)."""
 
 from __future__ import annotations
 
@@ -8,17 +8,19 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
 from ai_cowatcher.config import Settings
-from ai_cowatcher.domain import SceneEventRecord, SceneLookupHit
+from ai_cowatcher.domain import KnowledgeChunkRecord, KnowledgeSearchHit
 
 
-class QdrantSceneStore:
+class QdrantKnowledgeStore:
+    """Separate Qdrant collection for curated, non-spoiler knowledge chunks."""
+
     def __init__(self, settings: Settings, client: QdrantClient | None = None):
         self._settings = settings
         self._client = client or QdrantClient(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key or None,
         )
-        self._collection = settings.qdrant_collection
+        self._collection = settings.qdrant_knowledge_collection
 
     def ensure_collection(self, vector_size: int) -> None:
         if self._client.collection_exists(self._collection):
@@ -36,27 +38,24 @@ class QdrantSceneStore:
             vectors_config=qmodels.VectorParams(size=vector_size, distance=qmodels.Distance.COSINE),
         )
 
-    def upsert_scene_events(
-        self, events: list[SceneEventRecord], vectors: list[list[float]]
+    def upsert_chunks(
+        self, chunks: list[KnowledgeChunkRecord], vectors: list[list[float]]
     ) -> None:
-        if len(events) != len(vectors):
-            raise ValueError("events and vectors length mismatch")
+        if len(chunks) != len(vectors):
+            raise ValueError("chunks and vectors length mismatch")
 
         points = []
-        for event, vector in zip(events, vectors, strict=True):
+        for chunk, vector in zip(chunks, vectors, strict=True):
             points.append(
                 qmodels.PointStruct(
-                    id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{event.title_id}:{event.scene_id}")),
+                    id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{chunk.title_id}:{chunk.chunk_id}")),
                     vector=vector,
                     payload={
-                        "title_id": event.title_id,
-                        "scene_id": event.scene_id,
-                        "start_ts": event.start_ts,
-                        "end_ts": event.end_ts,
-                        "transcript": event.transcript,
-                        "caption": event.caption,
-                        "face_cluster_ids": event.face_cluster_ids,
-                        "speaker_cluster_ids": event.speaker_cluster_ids,
+                        "title_id": chunk.title_id,
+                        "chunk_id": chunk.chunk_id,
+                        "category": chunk.category,
+                        "text": chunk.text,
+                        "source": chunk.source,
                     },
                 )
             )
@@ -81,7 +80,7 @@ class QdrantSceneStore:
             ),
         )
 
-    def count_title_scenes(self, title_id: str) -> int:
+    def count_title_chunks(self, title_id: str) -> int:
         if not self._client.collection_exists(self._collection):
             return 0
         result = self._client.count(
@@ -98,16 +97,21 @@ class QdrantSceneStore:
         )
         return int(result.count)
 
-    def search_scenes(
+    def search_knowledge(
         self,
         *,
         title_id: str,
         query_vector: list[float],
-        current_ts: float,
         top_k: int,
-        spoiler_safe: bool = True,
-    ) -> list[SceneLookupHit]:
-        """Semantic search; optionally enforce spoiler guard (end_ts <= current_ts)."""
+        category: str | None = None,
+    ) -> list[KnowledgeSearchHit]:
+        """Semantic search over curated knowledge — NO current_ts / spoiler filter.
+
+        Unlike scene_lookup and character_lookup, this tool intentionally has no
+        playback-position constraint. Chunks are vetted offline public facts
+        (actor bios, crew, sports stats, production trivia) that do not depend on
+        how far the viewer has watched.
+        """
         if not self._client.collection_exists(self._collection):
             return []
 
@@ -117,38 +121,31 @@ class QdrantSceneStore:
                 match=qmodels.MatchValue(value=title_id),
             ),
         ]
-        if spoiler_safe:
+        if category:
             must_filters.append(
                 qmodels.FieldCondition(
-                    key="end_ts",
-                    range=qmodels.Range(lte=current_ts),
+                    key="category",
+                    match=qmodels.MatchValue(value=category),
                 )
             )
-
-        spoiler_filter = qmodels.Filter(must=must_filters)
 
         results = self._client.query_points(
             collection_name=self._collection,
             query=query_vector,
-            query_filter=spoiler_filter,
+            query_filter=qmodels.Filter(must=must_filters),
             limit=top_k,
             with_payload=True,
         ).points
 
-        hits = [
-            SceneLookupHit(
-                scene_id=str(point.payload.get("scene_id", "")),
+        return [
+            KnowledgeSearchHit(
+                chunk_id=str(point.payload.get("chunk_id", "")),
                 title_id=str(point.payload.get("title_id", title_id)),
-                start_ts=float(point.payload.get("start_ts", 0.0)),
-                end_ts=float(point.payload.get("end_ts", 0.0)),
-                transcript=str(point.payload.get("transcript", "")),
-                caption=str(point.payload.get("caption", "")),
-                face_cluster_ids=tuple(point.payload.get("face_cluster_ids") or ()),
-                speaker_cluster_ids=tuple(point.payload.get("speaker_cluster_ids") or ()),
+                category=str(point.payload.get("category", "")),
+                text=str(point.payload.get("text", "")),
+                source=str(point.payload.get("source", "")),
                 score=float(point.score or 0.0),
             )
             for point in results
             if point.payload is not None
         ]
-        hits.sort(key=lambda hit: (hit.start_ts, hit.scene_id))
-        return hits

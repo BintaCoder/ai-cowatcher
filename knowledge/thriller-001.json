@@ -1,0 +1,17 @@
+{
+  "title_id": "thriller-001",
+  "chunks": [
+    {
+      "chunk_id": "crew-director",
+      "category": "crew",
+      "source": "production_notes",
+      "text": "The director is Ava Chen, known for tight psychological thrillers and minimalist staging."
+    },
+    {
+      "chunk_id": "actor-marcus-bio",
+      "category": "actor_biography",
+      "source": "production_notes",
+      "text": "Marcus Hale is played by Jordan Ellis, a stage actor who trained at the Royal Academy of Dramatic Art."
+    }
+  ]
+}

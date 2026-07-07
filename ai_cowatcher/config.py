@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     qdrant_port: int = Field(default=6333, alias="QDRANT_PORT")
     qdrant_api_key: str = Field(default="", alias="QDRANT_API_KEY")
     qdrant_collection: str = Field(default="title_segments", alias="QDRANT_COLLECTION")
+    qdrant_knowledge_collection: str = Field(
+        default="title_knowledge", alias="QDRANT_KNOWLEDGE_COLLECTION"
+    )
+
+    # ── Neo4j (character intelligence graph) ──────────────────────────────────
+    neo4j_uri: str = Field(default="", alias="NEO4J_URI")
+    neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
+    neo4j_password: str = Field(default="cowatcher", alias="NEO4J_PASSWORD")
+    neo4j_database: str = Field(default="neo4j", alias="NEO4J_DATABASE")
 
     # ── MinIO ─────────────────────────────────────────────────────────────────
     minio_endpoint: str = Field(default="localhost:9000", alias="MINIO_ENDPOINT")
@@ -75,6 +84,16 @@ class Settings(BaseSettings):
     # ── Face recognition ──────────────────────────────────────────────────────
     insightface_model: str = Field(default="buffalo_l", alias="INSIGHTFACE_MODEL")
     insightface_ctx_id: int = Field(default=-1, alias="INSIGHTFACE_CTX_ID")
+
+    # ── Speaker diarization (pyannote.audio) ──────────────────────────────────
+    diarization_model: str = Field(
+        default="pyannote/speaker-diarization-3.1", alias="DIARIZATION_MODEL"
+    )
+    huggingface_token: str = Field(default="", alias="HUGGINGFACE_TOKEN")
+
+    # ── Character intelligence graph (offline enrichment) ─────────────────────
+    # Minimum face/speaker co-occurrence count to link a voice to a face.
+    character_link_min_cooccur: int = Field(default=1, alias="CHARACTER_LINK_MIN_COOCCUR")
 
     # ── Embeddings ────────────────────────────────────────────────────────────
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
@@ -121,6 +140,9 @@ class Settings(BaseSettings):
 
     # ── Real-time retrieval ─────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")
+    navigation_top_k: int = Field(default=15, alias="NAVIGATION_TOP_K")
+    knowledge_top_k: int = Field(default=5, alias="KNOWLEDGE_TOP_K")
+    knowledge_dir: str = Field(default="knowledge", alias="KNOWLEDGE_DIR")
 
     # ── Cast / actor lookup (TMDB) ────────────────────────────────────────────
     # Public cast metadata is not a plot spoiler, so this is safe to expose.
@@ -199,6 +221,18 @@ class Settings(BaseSettings):
     def cast_lookup_enabled(self) -> bool:
         """Cast lookup is available only with a TMDB key and outside mock mode."""
         return bool(self.tmdb_api_key) and not self.mock_mode
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def neo4j_enabled(self) -> bool:
+        """Character graph persists to Neo4j only when a URI is configured."""
+        return bool(self.neo4j_uri)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def character_graph_enabled(self) -> bool:
+        """Run the offline character-graph enrichment when Neo4j is configured."""
+        return bool(self.neo4j_uri)
 
     @property
     def title_name_map(self) -> dict[str, str]:

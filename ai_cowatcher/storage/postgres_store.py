@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ai_cowatcher.db.models import SceneEvent, TitleIngestion
-from ai_cowatcher.domain import SceneEventRecord
+from ai_cowatcher.db.models import SceneEvent, TitleEvent, TitleIngestion
+from ai_cowatcher.domain import SceneEventRecord, TitleEventRecord
 
 
 class SceneEventRepository:
@@ -68,6 +68,7 @@ class SceneEventRepository:
 
     def delete_title_data(self, title_id: str) -> None:
         self._session.execute(delete(SceneEvent).where(SceneEvent.title_id == title_id))
+        self._session.execute(delete(TitleEvent).where(TitleEvent.title_id == title_id))
         title = self.get_title(title_id)
         if title is not None:
             self._session.delete(title)
@@ -92,6 +93,7 @@ class SceneEventRepository:
             transcript=event.transcript,
             caption=event.caption,
             face_cluster_ids=event.face_cluster_ids,
+            speaker_cluster_ids=event.speaker_cluster_ids,
         )
         self._session.merge(row)
 
@@ -115,3 +117,96 @@ class SceneEventRepository:
             .order_by(TitleIngestion.title_id)
         )
         return list(self._session.scalars(stmt).all())
+
+    def list_scene_records(self, title_id: str) -> list[SceneEventRecord]:
+        stmt = (
+            select(SceneEvent)
+            .where(SceneEvent.title_id == title_id)
+            .order_by(SceneEvent.start_ts)
+        )
+        prefix = f"{title_id}:"
+        records: list[SceneEventRecord] = []
+        for row in self._session.scalars(stmt).all():
+            raw_scene_id = row.scene_id
+            if raw_scene_id.startswith(prefix):
+                raw_scene_id = raw_scene_id[len(prefix) :]
+            records.append(
+                SceneEventRecord(
+                    scene_id=raw_scene_id,
+                    title_id=row.title_id,
+                    start_ts=row.start_ts,
+                    end_ts=row.end_ts,
+                    transcript=row.transcript,
+                    caption=row.caption,
+                    face_cluster_ids=list(row.face_cluster_ids or []),
+                    speaker_cluster_ids=list(row.speaker_cluster_ids or []),
+                )
+            )
+        return records
+
+    def set_credits_start_ts(self, title_id: str, credits_start_ts: float | None) -> None:
+        title = self.get_title(title_id)
+        if title is None:
+            raise ValueError(f"Unknown title_id {title_id}")
+        title.credits_start_ts = credits_start_ts
+        self._session.commit()
+
+    def get_credits_start_ts(self, title_id: str) -> float | None:
+        title = self.get_title(title_id)
+        if title is None:
+            return None
+        return title.credits_start_ts
+
+    def replace_title_events(self, title_id: str, events: list[TitleEventRecord]) -> None:
+        self._session.execute(delete(TitleEvent).where(TitleEvent.title_id == title_id))
+        for event in events:
+            self._session.merge(
+                TitleEvent(
+                    event_id=event.event_id,
+                    title_id=event.title_id,
+                    event_type=event.event_type,
+                    ordinal=event.ordinal,
+                    start_ts=event.start_ts,
+                    end_ts=event.end_ts,
+                    scene_id=event.scene_id,
+                    label=event.label,
+                    event_metadata=event.metadata,
+                )
+            )
+        self._session.commit()
+
+    def list_title_events(
+        self, title_id: str, *, event_type: str | None = None
+    ) -> list[TitleEventRecord]:
+        stmt = select(TitleEvent).where(TitleEvent.title_id == title_id)
+        if event_type is not None:
+            stmt = stmt.where(TitleEvent.event_type == event_type)
+        stmt = stmt.order_by(TitleEvent.start_ts, TitleEvent.ordinal)
+        return [_title_event_to_record(row) for row in self._session.scalars(stmt).all()]
+
+    def get_title_event(
+        self, title_id: str, event_type: str, ordinal: int
+    ) -> TitleEventRecord | None:
+        stmt = select(TitleEvent).where(
+            TitleEvent.title_id == title_id,
+            TitleEvent.event_type == event_type,
+            TitleEvent.ordinal == ordinal,
+        )
+        row = self._session.scalars(stmt).first()
+        if row is None:
+            return None
+        return _title_event_to_record(row)
+
+
+def _title_event_to_record(row: TitleEvent) -> TitleEventRecord:
+    return TitleEventRecord(
+        event_id=row.event_id,
+        title_id=row.title_id,
+        event_type=row.event_type,
+        ordinal=row.ordinal,
+        start_ts=row.start_ts,
+        end_ts=row.end_ts,
+        scene_id=row.scene_id,
+        label=row.label,
+        metadata=dict(row.event_metadata or {}),
+    )

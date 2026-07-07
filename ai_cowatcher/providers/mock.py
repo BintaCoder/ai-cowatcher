@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-from ai_cowatcher.domain import SceneBoundary
+from ai_cowatcher.domain import SceneBoundary, SpeakerSegment
 
 
 class MockSceneDetector:
@@ -26,6 +26,17 @@ class MockAudioExtractor:
 class MockTranscriber:
     def transcribe_window(self, audio_path: str, start_ts: float, end_ts: float) -> str:
         return f"Mock transcript from {start_ts:.1f}s to {end_ts:.1f}s."
+
+
+class MockSpeakerDiarizer:
+    """Deterministic two-speaker diarization for local development and tests."""
+
+    def diarize(self, audio_path: str) -> list[SpeakerSegment]:
+        return [
+            SpeakerSegment(start_ts=0.0, end_ts=12.5, speaker_label="SPEAKER_00"),
+            SpeakerSegment(start_ts=12.5, end_ts=28.0, speaker_label="SPEAKER_01"),
+            SpeakerSegment(start_ts=28.0, end_ts=45.0, speaker_label="SPEAKER_00"),
+        ]
 
 
 class MockFaceAnalyzer:

@@ -11,9 +11,16 @@ from ai_cowatcher.agent.completion import CompletionClient, build_completion_cli
 from ai_cowatcher.agent.prompts import CONVERSATION_SYSTEM_PROMPT
 from ai_cowatcher.agent.tier_routing import TierRouter, build_tier_router
 from ai_cowatcher.agent.token_usage import TokenUsage
-from ai_cowatcher.agent.tools import CAST_LOOKUP_TOOL, SCENE_LOOKUP_TOOL
+from ai_cowatcher.agent.tools import (
+    CAST_LOOKUP_TOOL,
+    CHARACTER_LOOKUP_TOOL,
+    KNOWLEDGE_SEARCH_TOOL,
+    SCENE_LOOKUP_TOOL,
+)
 from ai_cowatcher.config import Settings
 from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
+from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
+from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
 from ai_cowatcher.retrieval.scene_lookup import SceneLookupTool
 
 logger = logging.getLogger(__name__)
@@ -44,15 +51,23 @@ class ConversationAgent:
         settings: Settings,
         tier_router: TierRouter | None = None,
         cast_lookup: CastLookupTool | None = None,
+        character_lookup: CharacterLookupTool | None = None,
+        knowledge_search: KnowledgeSearchTool | None = None,
     ):
         self._completion = completion_client
         self._scene_lookup = scene_lookup
         self._settings = settings
         self._tier_router = tier_router or build_tier_router(settings, completion_client)
         self._cast_lookup = cast_lookup
+        self._character_lookup = character_lookup
+        self._knowledge_search = knowledge_search
 
     def _available_tools(self) -> list[dict[str, Any]]:
         tools = [SCENE_LOOKUP_TOOL]
+        if self._knowledge_search is not None:
+            tools.append(KNOWLEDGE_SEARCH_TOOL)
+        if self._character_lookup is not None:
+            tools.append(CHARACTER_LOOKUP_TOOL)
         if self._cast_lookup is not None:
             tools.append(CAST_LOOKUP_TOOL)
         return tools
@@ -213,6 +228,16 @@ class ConversationAgent:
             )
             return [hit.to_tool_dict() for hit in hits], bool(hits)
 
+        if tool_call.name == "character_lookup" and self._character_lookup is not None:
+            character = tool_call.arguments.get("character")
+            result = self._character_lookup.lookup(
+                title_id=title_id,
+                character=str(character) if character else None,
+                current_ts=current_ts,
+            )
+            used = bool(result.get("found") and result.get("appearances"))
+            return result, used
+
         if tool_call.name == "cast_lookup" and self._cast_lookup is not None:
             title_name = (
                 str(tool_call.arguments.get("title_name", ""))
@@ -227,6 +252,16 @@ class ConversationAgent:
             )
             return result, bool(result.get("cast"))
 
+        if tool_call.name == "knowledge_search" and self._knowledge_search is not None:
+            query_text = str(tool_call.arguments.get("query_text", question))
+            category = tool_call.arguments.get("category")
+            hits = self._knowledge_search.search(
+                title_id=title_id,
+                query_text=query_text,
+                category=str(category) if category else None,
+            )
+            return [hit.to_tool_dict() for hit in hits], bool(hits)
+
         return None, False
 
 
@@ -236,6 +271,8 @@ def build_conversation_agent(
     completion_client: CompletionClient | None = None,
     tier_router: TierRouter | None = None,
     cast_lookup: CastLookupTool | None = None,
+    character_lookup: CharacterLookupTool | None = None,
+    knowledge_search: KnowledgeSearchTool | None = None,
 ) -> ConversationAgent:
     completion = completion_client or build_completion_client(settings)
     return ConversationAgent(
@@ -244,4 +281,6 @@ def build_conversation_agent(
         settings=settings,
         tier_router=tier_router or build_tier_router(settings, completion),
         cast_lookup=cast_lookup,
+        character_lookup=character_lookup,
+        knowledge_search=knowledge_search,
     )

@@ -117,8 +117,21 @@ class MockCompletionClient:
 
         if messages and messages[-1].get("role") == "tool":
             question = _latest_user_message(messages)
+            tool_content = messages[-1]["content"]
+            if _is_knowledge_tool_result(tool_content):
+                return CompletionResult(
+                    content=self._answer_from_knowledge(tool_content),
+                    tool_calls=[],
+                    usage=_mock_usage(messages),
+                )
+            if _is_character_tool_result(tool_content):
+                return CompletionResult(
+                    content=self._answer_from_character(tool_content, question),
+                    tool_calls=[],
+                    usage=_mock_usage(messages),
+                )
             return CompletionResult(
-                content=self._answer_from_tool_result(messages[-1]["content"], question),
+                content=self._answer_from_tool_result(tool_content, question),
                 tool_calls=[],
                 usage=_mock_usage(messages),
             )
@@ -133,6 +146,30 @@ class MockCompletionClient:
             )
 
         question = _latest_user_message(messages)
+        if _is_knowledge_question(question):
+            return CompletionResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="mock_call_knowledge_search",
+                        name="knowledge_search",
+                        arguments={"query_text": question},
+                    )
+                ],
+                usage=TokenUsage(prompt_tokens=48, completion_tokens=12, total_tokens=60),
+            )
+        if _is_character_question(question):
+            return CompletionResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="mock_call_character_lookup",
+                        name="character_lookup",
+                        arguments={"character": _character_name_hint(question)},
+                    )
+                ],
+                usage=TokenUsage(prompt_tokens=48, completion_tokens=12, total_tokens=60),
+            )
         return CompletionResult(
             content=None,
             tool_calls=[
@@ -144,6 +181,31 @@ class MockCompletionClient:
             ],
             usage=TokenUsage(prompt_tokens=48, completion_tokens=12, total_tokens=60),
         )
+
+    def _answer_from_character(self, tool_content: str, question: str) -> str:
+        try:
+            result = json.loads(tool_content)
+        except json.JSONDecodeError:
+            return _UNKNOWN_PHRASE
+        if not result.get("found") or not result.get("appearances"):
+            return "No, this looks like the first time you're seeing them."
+        count = result.get("appearance_count") or len(result.get("appearances", []))
+        parts = [f"Yes, you've seen them in {count} earlier scene(s)."]
+        for rel in result.get("relationships", []):
+            summary = rel.get("summary")
+            if summary:
+                parts.append(str(summary))
+        return " ".join(parts)
+
+    def _answer_from_knowledge(self, tool_content: str) -> str:
+        try:
+            chunks = json.loads(tool_content)
+        except json.JSONDecodeError:
+            return _UNKNOWN_PHRASE
+        if not isinstance(chunks, list) or not chunks:
+            return "I don't have that in our production notes."
+        text = str(chunks[0].get("text", "")).strip()
+        return text or "I don't have that in our production notes."
 
     def _answer_from_tool_result(self, tool_content: str, question: str) -> str:
         try:
@@ -176,6 +238,66 @@ def _latest_user_message(messages: list[dict[str, Any]]) -> str:
         if message.get("role") == "user":
             return str(message.get("content", ""))
     return ""
+
+
+_CHARACTER_INTENT = re.compile(
+    r"seen\s+(?:him|her|them)\s+before"
+    r"|who(?:'s| is| are)\s+(?:he|she|they|this)"
+    r"|how\s+do\s+(?:they|these two)\s+know"
+    r"|know\s+each\s+other"
+    r"|their\s+relationship"
+    r"|(?:have|has)\s+(?:they|we)\s+met"
+    r"|met\s+before"
+    r"|related\s+to\s+each\s+other",
+    re.IGNORECASE,
+)
+
+
+def _is_character_question(question: str) -> bool:
+    return bool(_CHARACTER_INTENT.search(question))
+
+
+def _character_name_hint(question: str) -> str:
+    """Extract a capitalized name if the viewer named someone, else empty.
+
+    Empty means "the person currently on screen" (e.g. 'have I seen him before?').
+    """
+    match = re.search(r"\b(?:is|are|does|did)\s+([A-Z][a-z]+)\b", question)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _is_character_tool_result(tool_content: str) -> bool:
+    try:
+        parsed = json.loads(tool_content)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and ("found" in parsed or "appearances" in parsed)
+
+
+def _is_knowledge_tool_result(tool_content: str) -> bool:
+    try:
+        parsed = json.loads(tool_content)
+    except json.JSONDecodeError:
+        return False
+    return (
+        isinstance(parsed, list)
+        and bool(parsed)
+        and isinstance(parsed[0], dict)
+        and "chunk_id" in parsed[0]
+    )
+
+
+_KNOWLEDGE_INTENT = re.compile(
+    r"\b(director|creator|created by|created|biograph|sports stat|production|"
+    r"who made|who directed|who created|crew|showrunner)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_knowledge_question(question: str) -> bool:
+    return bool(_KNOWLEDGE_INTENT.search(question))
 
 
 def _is_classifier_request(messages: list[dict[str, Any]]) -> bool:

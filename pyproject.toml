@@ -26,6 +26,8 @@ dependencies = [
     "minio==7.2.15",
     "httpx==0.28.1",
     "sqlalchemy==2.0.51",
+    "neo4j==6.2.0",
+    "langgraph==1.2.8",
 ]
 
 [project.optional-dependencies]
@@ -34,10 +36,15 @@ dev = [
     "pytest-asyncio==0.25.3",
     "ruff==0.11.2",
 ]
+# Speaker diarization pulls in torch; install explicitly for real (non-mock) ingest.
+diarization = [
+    "pyannote.audio>=3.1,<4.0",
+]
 
 [project.scripts]
 cowatcher-api = "ai_cowatcher.main:run"
 cowatcher-ingest = "ai_cowatcher.ingestion.cli:main"
+cowatcher-knowledge = "ai_cowatcher.ingestion.knowledge_cli:main"
 cowatcher-metrics-lite = "ai_cowatcher.observability.summarize_logs:main"
 
 [tool.setuptools.packages.find]
