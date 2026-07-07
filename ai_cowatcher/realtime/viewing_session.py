@@ -17,10 +17,12 @@ from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
 from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
 from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
 from ai_cowatcher.retrieval.scene_lookup import SceneLookupTool
+from ai_cowatcher.retrieval.user_memory import UserMemoryTool
 from ai_cowatcher.storage.character_store import CharacterStore, build_character_store
 from ai_cowatcher.storage.postgres_store import SceneEventRepository
 from ai_cowatcher.storage.qdrant_knowledge_store import QdrantKnowledgeStore
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
+from ai_cowatcher.storage.user_memory_store import UserMemoryStore, build_user_memory_store
 from sqlalchemy.orm import sessionmaker
 
 
@@ -48,10 +50,12 @@ class ViewingSession:
         agent: ConversationAgent,
         settings: Settings,
         session_factory: sessionmaker | None = None,
+        user_memory_store: UserMemoryStore | None = None,
     ):
         self._agent = agent
         self._settings = settings
         self._session_factory = session_factory
+        self._user_memory_store = user_memory_store
 
     def _lookup_title_display_name(self, title_id: str) -> str | None:
         if self._session_factory is None:
@@ -95,6 +99,22 @@ class ViewingSession:
             )
         )
 
+        if self._user_memory_store is not None:
+            self._user_memory_store.append_turn(
+                user_id=user_id,
+                title_id=title_id,
+                role="user",
+                content=question,
+                current_ts=current_ts,
+            )
+            self._user_memory_store.append_turn(
+                user_id=user_id,
+                title_id=title_id,
+                role="assistant",
+                content=answer.text,
+                current_ts=current_ts,
+            )
+
         return AskResult(
             answer=answer.text,
             title_id=title_id,
@@ -126,6 +146,7 @@ def build_viewing_session(
     session_factory: sessionmaker | None = None,
     character_store: CharacterStore | None = None,
     knowledge_store: QdrantKnowledgeStore | None = None,
+    user_memory_store: UserMemoryStore | None = None,
 ) -> ViewingSession:
     settings = settings or get_settings()
     qdrant = qdrant_store or QdrantSceneStore(settings)
@@ -140,6 +161,7 @@ def build_viewing_session(
         engine = create_db_engine(settings=settings)
         init_database(engine=engine, settings=settings)
         session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    memory_store = user_memory_store or build_user_memory_store(settings, session_factory)
     agent = build_conversation_agent(
         settings,
         scene_lookup,
@@ -147,5 +169,11 @@ def build_viewing_session(
         cast_lookup=cast_lookup,
         character_lookup=character_lookup,
         knowledge_search=knowledge_search,
+        user_memory=UserMemoryTool(memory_store, settings),
     )
-    return ViewingSession(agent, settings, session_factory=session_factory)
+    return ViewingSession(
+        agent,
+        settings,
+        session_factory=session_factory,
+        user_memory_store=memory_store,
+    )

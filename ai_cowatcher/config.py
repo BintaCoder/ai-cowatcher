@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     knowledge_top_k: int = Field(default=5, alias="KNOWLEDGE_TOP_K")
     knowledge_dir: str = Field(default="knowledge", alias="KNOWLEDGE_DIR")
 
+    # ── User conversation memory ────────────────────────────────────────────────
+    user_memory_max_turns: int = Field(default=10, alias="USER_MEMORY_MAX_TURNS")
+    user_memory_cache_turns: int = Field(default=20, alias="USER_MEMORY_CACHE_TURNS")
+    user_memory_redis_ttl_sec: int = Field(default=3600, alias="USER_MEMORY_REDIS_TTL_SEC")
+
     # ── Cast / actor lookup (TMDB) ────────────────────────────────────────────
     # Public cast metadata is not a plot spoiler, so this is safe to expose.
     tmdb_api_key: str = Field(default="", alias="TMDB_API_KEY")

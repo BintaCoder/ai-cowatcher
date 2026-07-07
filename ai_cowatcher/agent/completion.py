@@ -124,6 +124,12 @@ class MockCompletionClient:
                     tool_calls=[],
                     usage=_mock_usage(messages),
                 )
+            if _is_user_memory_tool_result(tool_content):
+                return CompletionResult(
+                    content=self._answer_from_user_memory(tool_content),
+                    tool_calls=[],
+                    usage=_mock_usage(messages),
+                )
             if _is_character_tool_result(tool_content):
                 return CompletionResult(
                     content=self._answer_from_character(tool_content, question),
@@ -146,6 +152,18 @@ class MockCompletionClient:
             )
 
         question = _latest_user_message(messages)
+        if _is_continuity_question(question):
+            return CompletionResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="mock_call_user_memory",
+                        name="user_memory",
+                        arguments={"mode": "summary"},
+                    )
+                ],
+                usage=TokenUsage(prompt_tokens=48, completion_tokens=12, total_tokens=60),
+            )
         if _is_knowledge_question(question):
             return CompletionResult(
                 content=None,
@@ -206,6 +224,18 @@ class MockCompletionClient:
             return "I don't have that in our production notes."
         text = str(chunks[0].get("text", "")).strip()
         return text or "I don't have that in our production notes."
+
+    def _answer_from_user_memory(self, tool_content: str) -> str:
+        try:
+            result = json.loads(tool_content)
+        except json.JSONDecodeError:
+            return _UNKNOWN_PHRASE
+        if not result.get("found"):
+            return "We haven't chatted about this title yet."
+        summary = str(result.get("summary", "")).strip()
+        if summary:
+            return summary
+        return "I don't have earlier messages to refer to."
 
     def _answer_from_tool_result(self, tool_content: str, question: str) -> str:
         try:
@@ -287,6 +317,25 @@ def _is_knowledge_tool_result(tool_content: str) -> bool:
         and isinstance(parsed[0], dict)
         and "chunk_id" in parsed[0]
     )
+
+
+def _is_user_memory_tool_result(tool_content: str) -> bool:
+    try:
+        parsed = json.loads(tool_content)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and "turns" in parsed and "summary" in parsed
+
+
+_CONTINUITY_INTENT = re.compile(
+    r"\b(as i (?:said|mentioned)|what did i ask|earlier i asked|before i asked|"
+    r"what was my (?:last )?question|i mentioned earlier)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_continuity_question(question: str) -> bool:
+    return bool(_CONTINUITY_INTENT.search(question))
 
 
 _KNOWLEDGE_INTENT = re.compile(

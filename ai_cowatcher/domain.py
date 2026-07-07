@@ -243,3 +243,23 @@ class KnowledgeSearchHit:
             "source": self.source,
             "score": self.score,
         }
+
+
+@dataclass(frozen=True)
+class ConversationTurnRecord:
+    """One message in a viewer's conversation history for a title."""
+
+    turn_id: str
+    user_id: str
+    title_id: str
+    role: str
+    content: str
+    current_ts: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "turn_id": self.turn_id,
+            "role": self.role,
+            "content": self.content,
+            "current_ts": self.current_ts,
+        }

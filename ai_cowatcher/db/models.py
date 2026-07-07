@@ -83,3 +83,19 @@ class SceneEvent(Base):
     )
 
     title: Mapped[TitleIngestion] = relationship(back_populates="scene_events")
+
+
+class UserConversationTurn(Base):
+    """Per-user conversation history for a title (source of truth in Postgres)."""
+
+    __tablename__ = "user_conversation_turns"
+
+    turn_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    current_ts: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

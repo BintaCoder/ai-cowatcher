@@ -16,12 +16,14 @@ from ai_cowatcher.agent.tools import (
     CHARACTER_LOOKUP_TOOL,
     KNOWLEDGE_SEARCH_TOOL,
     SCENE_LOOKUP_TOOL,
+    USER_MEMORY_TOOL,
 )
 from ai_cowatcher.config import Settings
 from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
 from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
 from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
 from ai_cowatcher.retrieval.scene_lookup import SceneLookupTool
+from ai_cowatcher.retrieval.user_memory import UserMemoryTool
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ class ConversationAgent:
         cast_lookup: CastLookupTool | None = None,
         character_lookup: CharacterLookupTool | None = None,
         knowledge_search: KnowledgeSearchTool | None = None,
+        user_memory: UserMemoryTool | None = None,
     ):
         self._completion = completion_client
         self._scene_lookup = scene_lookup
@@ -61,9 +64,12 @@ class ConversationAgent:
         self._cast_lookup = cast_lookup
         self._character_lookup = character_lookup
         self._knowledge_search = knowledge_search
+        self._user_memory = user_memory
 
     def _available_tools(self) -> list[dict[str, Any]]:
         tools = [SCENE_LOOKUP_TOOL]
+        if self._user_memory is not None:
+            tools.append(USER_MEMORY_TOOL)
         if self._knowledge_search is not None:
             tools.append(KNOWLEDGE_SEARCH_TOOL)
         if self._character_lookup is not None:
@@ -81,8 +87,6 @@ class ConversationAgent:
         user_id: str,
         title_display_name: str | None = None,
     ) -> AgentAnswer:
-        del user_id  # reserved for future personalization
-
         tier_selection = self._tier_router.select_tier(question)
         tier_decision = tier_selection.decision
         usage = tier_selection.usage or TokenUsage.empty()
@@ -96,6 +100,7 @@ class ConversationAgent:
             question=question,
             title_id=title_id,
             current_ts=current_ts,
+            user_id=user_id,
             tier_decision=tier_decision,
             confident_title=confident_title,
             search_title=search_title,
@@ -119,6 +124,7 @@ class ConversationAgent:
         question: str,
         title_id: str,
         current_ts: float,
+        user_id: str,
         tier_decision,
         confident_title: str | None = None,
         search_title: str | None = None,
@@ -157,6 +163,7 @@ class ConversationAgent:
                     question=question,
                     title_id=title_id,
                     current_ts=current_ts,
+                    user_id=user_id,
                     search_title=search_title,
                 )
                 if payload is None:
@@ -216,9 +223,21 @@ class ConversationAgent:
         question: str,
         title_id: str,
         current_ts: float,
+        user_id: str,
         search_title: str | None = None,
     ) -> tuple[Any, bool]:
         """Return (payload, used_context). payload is None for unsupported tools."""
+        if tool_call.name == "user_memory" and self._user_memory is not None:
+            mode = str(tool_call.arguments.get("mode", "summary"))
+            max_turns = tool_call.arguments.get("max_turns")
+            result = self._user_memory.lookup(
+                user_id=user_id,
+                title_id=title_id,
+                mode=mode,
+                max_turns=int(max_turns) if isinstance(max_turns, (int, str)) and str(max_turns).isdigit() else None,
+            )
+            return result, bool(result.get("found"))
+
         if tool_call.name == "scene_lookup":
             query_text = str(tool_call.arguments.get("query_text", question))
             hits = self._scene_lookup.lookup(
@@ -273,6 +292,7 @@ def build_conversation_agent(
     cast_lookup: CastLookupTool | None = None,
     character_lookup: CharacterLookupTool | None = None,
     knowledge_search: KnowledgeSearchTool | None = None,
+    user_memory: UserMemoryTool | None = None,
 ) -> ConversationAgent:
     completion = completion_client or build_completion_client(settings)
     return ConversationAgent(
@@ -283,4 +303,5 @@ def build_conversation_agent(
         cast_lookup=cast_lookup,
         character_lookup=character_lookup,
         knowledge_search=knowledge_search,
+        user_memory=user_memory,
     )

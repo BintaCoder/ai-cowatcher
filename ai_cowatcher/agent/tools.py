@@ -119,3 +119,35 @@ KNOWLEDGE_SEARCH_TOOL = {
 }
 
 AGENT_TOOLS = [SCENE_LOOKUP_TOOL]
+
+USER_MEMORY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "user_memory",
+        "description": (
+            "Retrieve this viewer's own prior questions and answers for the title "
+            "they are currently watching. Use when they refer to something they "
+            "said earlier ('as I mentioned', 'what did I ask before', continuity). "
+            "Returns only this viewer's history for this title — never other users. "
+            "Does not use playback position; it is personal chat history, not plot data."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["turns", "summary"],
+                    "description": (
+                        "'turns' returns the last N messages; 'summary' returns a "
+                        "short recap of recent exchanges."
+                    ),
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "How many recent turns to return (default 10).",
+                },
+            },
+            "required": [],
+        },
+    },
+}
