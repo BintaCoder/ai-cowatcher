@@ -10,13 +10,7 @@ from threading import Lock
 logger = logging.getLogger("ai_cowatcher.ask")
 
 ASK_EVENT = "ask_request"
-_UNKNOWN_PHRASES = (
-    "don't know yet",
-    "do not know yet",
-    "not sure yet",
-    "nothing's made that clear",
-    "nothings made that clear",
-)
+_UNKNOWN_PHRASE = "don't know yet"
 
 _lock = Lock()
 _records: list[AskRecord] = []
@@ -39,17 +33,12 @@ class AskRecord:
 
 
 def is_dont_know_answer(answer: str) -> bool:
-    lowered = answer.lower()
-    return any(phrase in lowered for phrase in _UNKNOWN_PHRASES)
+    return _UNKNOWN_PHRASE in answer.lower()
 
 
 def record_ask_request(record: AskRecord) -> None:
     with _lock:
         _records.append(record)
-
-    from ai_cowatcher.observability.prometheus_metrics import observe_ask_record
-
-    observe_ask_record(record)
 
     payload = {
         "event": ASK_EVENT,

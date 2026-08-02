@@ -62,7 +62,7 @@ def test_scene_lookup_never_returns_future_scenes_even_when_best_match(
     test_settings: Settings,
     qdrant_store: QdrantSceneStore,
 ):
-    """Spoiler guard: end_ts > current_ts scenes are excluded regardless of score."""
+    """Spoiler guard: scenes that have not started yet are excluded regardless of score."""
     embedder = MockTextEmbedder()
     query_vector = embedder.embed_texts(["killer reveal secret twist"])[0]
     title_id = "mystery-001"
@@ -85,6 +85,16 @@ def test_scene_lookup_never_returns_future_scenes_even_when_best_match(
         transcript="The killer is Marcus and nobody expected it.",
         vector=query_vector,
     )
+    # In-progress scene (already started, not finished) must still be visible.
+    _upsert_scene(
+        qdrant_store,
+        title_id=title_id,
+        scene_id="s000current",
+        start_ts=20.0,
+        end_ts=45.0,
+        transcript="Detectives talk about the night of the crime.",
+        vector=embedder.embed_texts(["detectives talk crime"])[0],
+    )
 
     tool = SceneLookupTool(embedder, qdrant_store, test_settings)
     hits = tool.lookup(
@@ -96,10 +106,8 @@ def test_scene_lookup_never_returns_future_scenes_even_when_best_match(
 
     scene_ids = {hit.scene_id for hit in hits}
     assert "s0001" not in scene_ids
-    assert all(hit.end_ts <= 30.0 for hit in hits)
-
-    if hits:
-        assert hits[0].scene_id == "s0000"
+    assert all(hit.start_ts <= 30.0 for hit in hits)
+    assert "s000current" in scene_ids or "s0000" in scene_ids
 
 
 def test_scene_lookup_returns_hits_in_chronological_order(

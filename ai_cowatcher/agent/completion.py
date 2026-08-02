@@ -132,7 +132,7 @@ class LiteLLMCompletionClient:
                 yield text
 
 
-_UNKNOWN_PHRASE = "I don't know yet based on what has aired so far."
+_UNKNOWN_PHRASE = "Not sure yet — nothing's made that clear so far."
 
 
 def _chunk_text_for_stream(text: str) -> Iterator[str]:
@@ -219,6 +219,20 @@ class MockCompletionClient:
             )
 
         question = _latest_user_message(messages)
+        if _is_joke_question(question):
+            return CompletionResult(
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="mock_call_scene_lookup",
+                        name="scene_lookup",
+                        arguments={
+                            "query_text": "funny dialogue conversation banter what just happened"
+                        },
+                    )
+                ],
+                usage=TokenUsage(prompt_tokens=48, completion_tokens=12, total_tokens=60),
+            )
         if _is_continuity_question(question):
             return CompletionResult(
                 content=None,
@@ -313,21 +327,45 @@ class MockCompletionClient:
         if not scenes:
             return _UNKNOWN_PHRASE
 
+        if _is_joke_question(question):
+            return self._joke_from_scenes(scenes)
+
         combined = " ".join(
             f"{scene.get('transcript', '')} {scene.get('caption', '')}" for scene in scenes
         )
         killer_match = re.search(r"killer is ([A-Za-z]+)", combined, re.IGNORECASE)
         if killer_match:
             killer = killer_match.group(1)
-            return f"Based on what has aired so far, the killer is {killer}."
+            return f"Looks like the killer is {killer}."
 
         if re.search(r"\bkiller\b", question, re.IGNORECASE):
             return _UNKNOWN_PHRASE
 
         snippet = scenes[0].get("transcript") or scenes[0].get("caption") or ""
         if snippet:
-            return f"Based on what has aired so far: {snippet.strip()}"
+            # One short friend-line, not a recap dump.
+            short = " ".join(str(snippet).split())
+            words = short.split()
+            if len(words) > 18:
+                short = " ".join(words[:18]).rstrip(",;:") + "…"
+            return short
         return _UNKNOWN_PHRASE
+
+    def _joke_from_scenes(self, scenes: list[Any]) -> str:
+        snippet = scenes[0].get("transcript") or scenes[0].get("caption") or ""
+        if not snippet:
+            return "Nothing to riff on yet — hit me again in a sec."
+        short = " ".join(str(snippet).split())
+        words = short.split()
+        if len(words) > 10:
+            short = " ".join(words[:10]).rstrip(",;:")
+        return f'Couch take: "{short}" — peak drama.'
+
+
+def _is_joke_question(question: str) -> bool:
+    from ai_cowatcher.agent.joke_intent import is_joke_request
+
+    return is_joke_request(question)
 
 
 def _latest_user_message(messages: list[dict[str, Any]]) -> str:

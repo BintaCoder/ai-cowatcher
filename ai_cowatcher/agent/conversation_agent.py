@@ -8,14 +8,22 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from ai_cowatcher.agent.brevity import enforce_brief_answer
 from ai_cowatcher.agent.completion import (
     CompletionClient,
     build_completion_client,
     _chunk_text_for_stream,
 )
-from ai_cowatcher.agent.prompts import CONVERSATION_SYSTEM_PROMPT
+from ai_cowatcher.agent.grounding import grounded_fallback_answer, is_refusal_answer
+from ai_cowatcher.agent.joke_intent import (
+    is_joke_request,
+    joke_fallback_answer,
+    joke_scene_query,
+    soft_no_scene_joke,
+)
+from ai_cowatcher.agent.prompts import CONVERSATION_SYSTEM_PROMPT, JOKE_MODE_SYSTEM_PROMPT
 from ai_cowatcher.agent.stream_events import AskStreamEvent
-from ai_cowatcher.agent.tier_routing import TierRouter, build_tier_router
+from ai_cowatcher.agent.tier_routing import ModelTierDecision, TierRouter, build_tier_router
 from ai_cowatcher.agent.token_usage import TokenUsage
 from ai_cowatcher.agent.tools import (
     CAST_LOOKUP_TOOL,
@@ -35,7 +43,7 @@ from ai_cowatcher.retrieval.user_memory import UserMemoryTool
 logger = logging.getLogger(__name__)
 
 _MAX_TOOL_ROUNDS = 3
-_UNKNOWN_ANSWER = "I don't know yet based on what has aired so far."
+_UNKNOWN_ANSWER = "Not sure yet — nothing's made that clear so far."
 
 _TOOL_STATUS = {
     "scene_lookup": "Searching scenes…",
@@ -111,15 +119,26 @@ class ConversationAgent:
         )
         search_title = confident_title or self._settings.derive_title_from_id(title_id)
 
-        text, loop_usage, used_context = self._run_tool_loop(
-            question=question,
-            title_id=title_id,
-            current_ts=current_ts,
-            user_id=user_id,
-            tier_decision=tier_decision,
-            confident_title=confident_title,
-            search_title=search_title,
-        )
+        if is_joke_request(question):
+            tier_decision = self._force_fast_tier(tier_decision, reason="joke_request")
+            text, loop_usage, used_context = self._run_joke_loop(
+                question=question,
+                title_id=title_id,
+                current_ts=current_ts,
+                tier_decision=tier_decision,
+                confident_title=confident_title,
+                search_title=search_title,
+            )
+        else:
+            text, loop_usage, used_context = self._run_tool_loop(
+                question=question,
+                title_id=title_id,
+                current_ts=current_ts,
+                user_id=user_id,
+                tier_decision=tier_decision,
+                confident_title=confident_title,
+                search_title=search_title,
+            )
         usage = usage.merge(loop_usage)
 
         return AgentAnswer(
@@ -154,17 +173,28 @@ class ConversationAgent:
         )
         search_title = confident_title or self._settings.derive_title_from_id(title_id)
 
-        yield AskStreamEvent(type="status", message="Thinking…")
-
-        text, loop_usage, used_context = yield from self._run_tool_loop_stream(
-            question=question,
-            title_id=title_id,
-            current_ts=current_ts,
-            user_id=user_id,
-            tier_decision=tier_decision,
-            confident_title=confident_title,
-            search_title=search_title,
-        )
+        if is_joke_request(question):
+            tier_decision = self._force_fast_tier(tier_decision, reason="joke_request")
+            yield AskStreamEvent(type="status", message="Cooking a one-liner…")
+            text, loop_usage, used_context = yield from self._run_joke_loop_stream(
+                question=question,
+                title_id=title_id,
+                current_ts=current_ts,
+                tier_decision=tier_decision,
+                confident_title=confident_title,
+                search_title=search_title,
+            )
+        else:
+            yield AskStreamEvent(type="status", message="Thinking…")
+            text, loop_usage, used_context = yield from self._run_tool_loop_stream(
+                question=question,
+                title_id=title_id,
+                current_ts=current_ts,
+                user_id=user_id,
+                tier_decision=tier_decision,
+                confident_title=confident_title,
+                search_title=search_title,
+            )
         usage = usage.merge(loop_usage)
 
         yield AskStreamEvent(
@@ -177,6 +207,214 @@ class ConversationAgent:
             # piggy-back token totals in detail as JSON would break scheme — add fields if needed
         )
         del usage
+
+    def _force_fast_tier(self, _tier_decision: ModelTierDecision, *, reason: str) -> ModelTierDecision:
+        return ModelTierDecision(
+            tier="fast",
+            model=self._settings.conversation_fast_model,
+            reason=reason,
+        )
+
+    def _tool_max_tokens(self) -> int:
+        return max(self._settings.llm_max_tokens, self._settings.llm_tool_max_tokens)
+
+    def _answer_max_tokens(self) -> int:
+        return self._settings.llm_max_tokens
+
+    def _force_scene_grounding(
+        self,
+        *,
+        question: str,
+        title_id: str,
+        current_ts: float,
+    ) -> list[Any]:
+        """Always available backup retrieval when the model refuses without tools."""
+        with observe_tool_call("scene_lookup"):
+            hits = self._scene_lookup.lookup(
+                title_id=title_id,
+                query_text=question,
+                current_ts=current_ts,
+            )
+        return [[hit.to_tool_dict() for hit in hits]] if hits else []
+
+    def _finalize_answer(
+        self,
+        *,
+        raw: str | None,
+        question: str,
+        tool_payloads: list[Any],
+        used_context: bool,
+        title_id: str | None = None,
+        current_ts: float | None = None,
+        force_lookup_if_empty: bool = True,
+        joke_mode: bool = False,
+    ) -> tuple[str, bool]:
+        default = soft_no_scene_joke() if joke_mode else _UNKNOWN_ANSWER
+        text = enforce_brief_answer(
+            (raw or "").strip() or default,
+            question,
+            joke_mode=joke_mode,
+        )
+        payloads = list(tool_payloads)
+        if is_refusal_answer(text) and not payloads and force_lookup_if_empty:
+            if title_id is not None and current_ts is not None:
+                query = joke_scene_query(question) if joke_mode else question
+                payloads = self._force_scene_grounding(
+                    question=query,
+                    title_id=title_id,
+                    current_ts=current_ts,
+                )
+        if is_refusal_answer(text) and payloads:
+            if joke_mode:
+                fallback = joke_fallback_answer(payloads)
+            else:
+                fallback = grounded_fallback_answer(question, payloads)
+            if fallback:
+                return enforce_brief_answer(
+                    fallback, question, joke_mode=joke_mode
+                ), True
+        if joke_mode and not payloads:
+            return soft_no_scene_joke(), False
+        return text, used_context or bool(payloads)
+
+    def _run_joke_loop(
+        self,
+        *,
+        question: str,
+        title_id: str,
+        current_ts: float,
+        tier_decision: ModelTierDecision,
+        confident_title: str | None = None,
+        search_title: str | None = None,
+    ) -> tuple[str, TokenUsage | None, bool]:
+        """Fast joke path: always ground on current scenes, then one short punchline."""
+        messages, payloads, used_context = self._joke_grounded_messages(
+            question=question,
+            title_id=title_id,
+            current_ts=current_ts,
+            confident_title=confident_title,
+            search_title=search_title,
+        )
+        if not payloads:
+            return soft_no_scene_joke(), TokenUsage.empty(), False
+
+        result = self._completion.complete(
+            model=tier_decision.model,
+            messages=messages,
+            tools=None,
+            temperature=min(0.85, max(0.55, self._settings.llm_temperature + 0.3)),
+            max_tokens=self._answer_max_tokens(),
+        )
+        text, used = self._finalize_answer(
+            raw=result.content,
+            question=question,
+            tool_payloads=payloads,
+            used_context=used_context,
+            joke_mode=True,
+            force_lookup_if_empty=False,
+        )
+        return text, result.usage, used
+
+    def _run_joke_loop_stream(
+        self,
+        *,
+        question: str,
+        title_id: str,
+        current_ts: float,
+        tier_decision: ModelTierDecision,
+        confident_title: str | None = None,
+        search_title: str | None = None,
+    ) -> Iterator[AskStreamEvent]:
+        yield AskStreamEvent(type="status", message="Checking the scene…")
+        yield AskStreamEvent(type="tool_start", tool="scene_lookup", message="Checking the scene…")
+        messages, payloads, used_context = self._joke_grounded_messages(
+            question=question,
+            title_id=title_id,
+            current_ts=current_ts,
+            confident_title=confident_title,
+            search_title=search_title,
+        )
+        yield AskStreamEvent(type="tool_end", tool="scene_lookup", message="scene_lookup done")
+
+        if not payloads:
+            joke = soft_no_scene_joke()
+            yield AskStreamEvent(type="status", message="Answering…")
+            for piece in _chunk_text_for_stream(joke):
+                yield AskStreamEvent(type="token", text=piece)
+            return joke, TokenUsage.empty(), False
+
+        yield AskStreamEvent(type="status", message="Answering…")
+        parts: list[str] = []
+        usage = TokenUsage.empty()
+        for delta in self._completion.complete_stream(
+            model=tier_decision.model,
+            messages=messages,
+            temperature=min(0.85, max(0.55, self._settings.llm_temperature + 0.3)),
+            max_tokens=self._answer_max_tokens(),
+        ):
+            parts.append(delta)
+        # complete_stream may not report usage — empty is fine for joke path
+        answer_text, used = self._finalize_answer(
+            raw="".join(parts),
+            question=question,
+            tool_payloads=payloads,
+            used_context=used_context,
+            joke_mode=True,
+            force_lookup_if_empty=False,
+        )
+        for piece in _chunk_text_for_stream(answer_text):
+            yield AskStreamEvent(type="token", text=piece)
+        return answer_text, usage, used
+
+    def _joke_grounded_messages(
+        self,
+        *,
+        question: str,
+        title_id: str,
+        current_ts: float,
+        confident_title: str | None,
+        search_title: str | None,
+    ) -> tuple[list[dict[str, Any]], list[Any], bool]:
+        query = joke_scene_query(question)
+        with observe_tool_call("scene_lookup"):
+            hits = self._scene_lookup.lookup(
+                title_id=title_id,
+                query_text=query,
+                current_ts=current_ts,
+            )
+        payload = [hit.to_tool_dict() for hit in hits]
+        messages = self._initial_messages(
+            question, confident_title, search_title, joke_mode=True
+        )
+        if not payload:
+            return messages, [], False
+
+        tool_call_id = "joke_scene_lookup"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "scene_lookup",
+                            "arguments": json.dumps({"query_text": query}),
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": "scene_lookup",
+                "content": json.dumps(payload),
+            }
+        )
+        return messages, [payload], True
 
     def _run_tool_loop_stream(
         self,
@@ -194,6 +432,7 @@ class ConversationAgent:
         usage = TokenUsage.empty()
         used_context = False
         tools = self._available_tools()
+        tool_payloads: list[Any] = []
 
         for _ in range(_MAX_TOOL_ROUNDS):
             result = self._completion.complete(
@@ -201,12 +440,19 @@ class ConversationAgent:
                 messages=messages,
                 tools=tools,
                 temperature=self._settings.llm_temperature,
-                max_tokens=self._settings.llm_max_tokens,
+                max_tokens=self._tool_max_tokens(),
             )
             usage = usage.merge(result.usage)
 
             if not result.tool_calls:
-                answer_text = (result.content or "").strip() or _UNKNOWN_ANSWER
+                answer_text, used_context = self._finalize_answer(
+                    raw=result.content,
+                    question=question,
+                    tool_payloads=tool_payloads,
+                    used_context=used_context,
+                    title_id=title_id,
+                    current_ts=current_ts,
+                )
                 yield AskStreamEvent(type="status", message="Answering…")
                 for piece in _chunk_text_for_stream(answer_text):
                     yield AskStreamEvent(type="token", text=piece)
@@ -236,6 +482,7 @@ class ConversationAgent:
                     continue
 
                 used_context = used_context or hit_context
+                tool_payloads.append(payload)
                 messages.append(
                     {
                         "role": "tool",
@@ -258,12 +505,20 @@ class ConversationAgent:
             model=tier_decision.model,
             messages=messages,
             temperature=self._settings.llm_temperature,
-            max_tokens=self._settings.llm_max_tokens,
+            max_tokens=self._answer_max_tokens(),
         ):
             parts.append(delta)
-            yield AskStreamEvent(type="token", text=delta)
-        text = "".join(parts).strip() or _UNKNOWN_ANSWER
-        return text, usage, used_context
+        answer_text, used_context = self._finalize_answer(
+            raw="".join(parts),
+            question=question,
+            tool_payloads=tool_payloads,
+            used_context=used_context,
+            title_id=title_id,
+            current_ts=current_ts,
+        )
+        for piece in _chunk_text_for_stream(answer_text):
+            yield AskStreamEvent(type="token", text=piece)
+        return answer_text, usage, used_context
 
     def _run_tool_loop(
         self,
@@ -280,6 +535,7 @@ class ConversationAgent:
         usage = TokenUsage.empty()
         used_context = False
         tools = self._available_tools()
+        tool_payloads: list[Any] = []
 
         for _ in range(_MAX_TOOL_ROUNDS):
             result = self._completion.complete(
@@ -287,14 +543,20 @@ class ConversationAgent:
                 messages=messages,
                 tools=tools,
                 temperature=self._settings.llm_temperature,
-                max_tokens=self._settings.llm_max_tokens,
+                max_tokens=self._tool_max_tokens(),
             )
             usage = usage.merge(result.usage)
 
             if not result.tool_calls:
-                if result.content:
-                    return result.content.strip(), usage, used_context
-                return _UNKNOWN_ANSWER, usage, used_context
+                text, used_context = self._finalize_answer(
+                    raw=result.content,
+                    question=question,
+                    tool_payloads=tool_payloads,
+                    used_context=used_context,
+                    title_id=title_id,
+                    current_ts=current_ts,
+                )
+                return text, usage, used_context
 
             messages.append(self._assistant_tool_calls_message(result))
             for tool_call in result.tool_calls:
@@ -310,6 +572,7 @@ class ConversationAgent:
                     logger.warning("Ignoring unsupported tool call: %s", tool_call.name)
                     continue
                 used_context = used_context or hit_context
+                tool_payloads.append(payload)
                 messages.append(
                     {
                         "role": "tool",
@@ -319,18 +582,23 @@ class ConversationAgent:
                     }
                 )
 
-        return _UNKNOWN_ANSWER, usage, used_context
+        fallback = grounded_fallback_answer(question, tool_payloads)
+        return (fallback or _UNKNOWN_ANSWER), usage, bool(tool_payloads) or used_context
 
     def _initial_messages(
         self,
         question: str,
         confident_title: str | None,
         search_title: str | None,
+        *,
+        joke_mode: bool = False,
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": CONVERSATION_SYSTEM_PROMPT}
         ]
-        if self._cast_lookup is not None:
+        if joke_mode:
+            messages.append({"role": "system", "content": JOKE_MODE_SYSTEM_PROMPT})
+        if self._cast_lookup is not None and not joke_mode:
             hint = self._cast_title_hint(confident_title, search_title)
             if hint:
                 messages.append({"role": "system", "content": hint})

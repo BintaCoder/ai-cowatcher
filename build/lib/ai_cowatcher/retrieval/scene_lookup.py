@@ -1,9 +1,4 @@
-"""scene_lookup tool — spoiler-safe semantic retrieval over ingested scenes.
-
-Spoiler rule: only scenes with ``start_ts <= current_ts`` (already started,
-including the scene currently playing). Scenes that start after the playhead
-are never returned.
-"""
+"""scene_lookup tool — spoiler-safe semantic retrieval over ingested scenes."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 
 
 class SceneLookupTool:
-    """Query Qdrant for matching scenes at (or before) the viewer's playhead."""
+    """Query Qdrant for matching scenes visible at the viewer's current timestamp."""
 
     def __init__(
         self,

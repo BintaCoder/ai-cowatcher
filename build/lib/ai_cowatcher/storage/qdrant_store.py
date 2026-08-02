@@ -9,7 +9,6 @@ from qdrant_client.http import models as qmodels
 
 from ai_cowatcher.config import Settings
 from ai_cowatcher.domain import SceneEventRecord, SceneLookupHit
-from ai_cowatcher.observability.prometheus_metrics import observe_storage_query
 
 
 class QdrantSceneStore:
@@ -57,7 +56,6 @@ class QdrantSceneStore:
                         "transcript": event.transcript,
                         "caption": event.caption,
                         "face_cluster_ids": event.face_cluster_ids,
-                        "speaker_cluster_ids": event.speaker_cluster_ids,
                     },
                 )
             )
@@ -106,39 +104,31 @@ class QdrantSceneStore:
         query_vector: list[float],
         current_ts: float,
         top_k: int,
-        spoiler_safe: bool = True,
     ) -> list[SceneLookupHit]:
-        """Semantic search; optionally enforce spoiler guard (start_ts <= current_ts)."""
+        """Semantic search with spoiler guard: only scenes with end_ts <= current_ts."""
         if not self._client.collection_exists(self._collection):
             return []
 
-        must_filters = [
-            qmodels.FieldCondition(
-                key="title_id",
-                match=qmodels.MatchValue(value=title_id),
-            ),
-        ]
-        if spoiler_safe:
-            # Scene has *started* by now — includes the in-progress scene the viewer is
-            # watching. (end_ts-only filtering excluded the current scene mid-clip and
-            # caused empty retrieval → excessive "I don't know" answers.)
-            must_filters.append(
+        spoiler_filter = qmodels.Filter(
+            must=[
                 qmodels.FieldCondition(
-                    key="start_ts",
+                    key="title_id",
+                    match=qmodels.MatchValue(value=title_id),
+                ),
+                qmodels.FieldCondition(
+                    key="end_ts",
                     range=qmodels.Range(lte=current_ts),
-                )
-            )
+                ),
+            ]
+        )
 
-        spoiler_filter = qmodels.Filter(must=must_filters)
-
-        with observe_storage_query("qdrant", "search_scenes"):
-            results = self._client.query_points(
-                collection_name=self._collection,
-                query=query_vector,
-                query_filter=spoiler_filter,
-                limit=top_k,
-                with_payload=True,
-            ).points
+        results = self._client.query_points(
+            collection_name=self._collection,
+            query=query_vector,
+            query_filter=spoiler_filter,
+            limit=top_k,
+            with_payload=True,
+        ).points
 
         hits = [
             SceneLookupHit(
@@ -149,7 +139,6 @@ class QdrantSceneStore:
                 transcript=str(point.payload.get("transcript", "")),
                 caption=str(point.payload.get("caption", "")),
                 face_cluster_ids=tuple(point.payload.get("face_cluster_ids") or ()),
-                speaker_cluster_ids=tuple(point.payload.get("speaker_cluster_ids") or ()),
                 score=float(point.score or 0.0),
             )
             for point in results
