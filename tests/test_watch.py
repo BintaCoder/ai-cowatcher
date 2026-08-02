@@ -73,6 +73,9 @@ def test_watch_page_served(watch_client):
     assert response.status_code == 200
     assert "Co-watcher" in response.text
     assert "SpeechRecognition" in response.text
+    assert "parseClientSeekTimestamp" in response.text
+    assert "speakAnswerInBackground" in response.text
+    assert "questionInput" in response.text
 
 
 def test_titles_endpoint_lists_completed(watch_client):

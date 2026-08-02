@@ -58,7 +58,7 @@
       flex-wrap: wrap;
     }
     label { color: var(--muted); font-size: 0.85rem; }
-    select, button {
+    select, button, input[type="text"] {
       font: inherit;
       border-radius: 10px;
       border: 1px solid var(--border);
@@ -67,6 +67,10 @@
       padding: 0.55rem 0.85rem;
     }
     select { min-width: 220px; }
+    #questionInput {
+      flex: 1 1 220px;
+      min-width: 180px;
+    }
     button {
       cursor: pointer;
       transition: background 0.15s ease, transform 0.05s ease;
@@ -165,7 +169,11 @@
         <button id="resumeBtn" type="button" disabled>Resume video</button>
         <label class="nav-toggle"><input id="navigationMode" type="checkbox" checked /> Navigate mode (jump to moments)</label>
       </div>
-      <p class="hint">Hold <strong>Space</strong> or press and hold the mic button while you speak. Ask questions normally, or say <strong>"take me to 10 minutes"</strong>, <strong>"second fight"</strong>, <strong>"first goal"</strong>, <strong>"credits"</strong>, or <strong>"where does [actor] appear"</strong> to jump.</p>
+      <div class="toolbar">
+        <input id="questionInput" type="text" placeholder="Or type a question / “go to 10:00”…" autocomplete="off" />
+        <button id="sendBtn" type="button" disabled>Ask</button>
+      </div>
+      <p class="hint">Hold <strong>Space</strong> or the mic button to speak, or type below. Clock jumps (e.g. <strong>"go to 10 minutes"</strong>) seek immediately. Say <strong>"second fight"</strong>, <strong>"credits"</strong>, or <strong>"where does [actor] appear"</strong> to jump.</p>
       <div id="status" class="status">Pick a title to start.</div>
     </section>
 
@@ -186,6 +194,8 @@
     const titleSelect = document.getElementById("titleSelect");
     const micBtn = document.getElementById("micBtn");
     const resumeBtn = document.getElementById("resumeBtn");
+    const sendBtn = document.getElementById("sendBtn");
+    const questionInput = document.getElementById("questionInput");
     const navigationMode = document.getElementById("navigationMode");
     const statusEl = document.getElementById("status");
     const questionText = document.getElementById("questionText");
@@ -196,6 +206,9 @@
 
     const USER_ID = "web-viewer";
     const NAV_INTENT_RE = /\b(go to|jump to|skip to|take me to|show me|find|where does|where is|when does)\b/i;
+    const GO_TO_TIME_RE = /\b(?:go|jump|skip|take me)\s+to\s+(\d{1,2}:\d{2}(?::\d{2})?|\d+(?:\.\d+)?\s*(?:hours?|hrs?|h|minutes?|mins?|m))\b/i;
+    const CLOCK_RE = /\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b/;
+    const DURATION_RE = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi;
 
     function isNavigationQuestion(question) {
       if (navigationMode && navigationMode.checked) {
@@ -207,6 +220,60 @@
         if (/\b(airplane|plane|crash)\b/i.test(question)) return true;
       }
       return NAV_INTENT_RE.test(question);
+    }
+
+    /** Client-side absolute seek (seconds), mirrors server time_parse for clock/duration. */
+    function parseClientSeekTimestamp(question) {
+      if (!question) return null;
+      const goMatch = question.match(GO_TO_TIME_RE);
+      if (goMatch) {
+        const fragment = goMatch[1];
+        if (fragment.includes(":")) {
+          return parseClockFragment(fragment);
+        }
+        const duration = parseDurationSeconds(question);
+        if (duration != null) return duration;
+      }
+      const clock = parseClockFragment(question);
+      if (clock != null) return clock;
+      return parseDurationSeconds(question);
+    }
+
+    function parseClockFragment(text) {
+      const match = text.match(CLOCK_RE);
+      if (!match) return null;
+      let hours = 0;
+      let minutes;
+      let seconds;
+      if (match[3] != null) {
+        hours = parseInt(match[1], 10);
+        minutes = parseInt(match[2], 10);
+        seconds = parseInt(match[3], 10);
+      } else if (parseInt(match[1], 10) > 59) {
+        hours = parseInt(match[1], 10);
+        minutes = parseInt(match[2], 10);
+        seconds = 0;
+      } else {
+        minutes = parseInt(match[1], 10);
+        seconds = parseInt(match[2], 10);
+      }
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+
+    function parseDurationSeconds(text) {
+      let total = 0;
+      let found = false;
+      DURATION_RE.lastIndex = 0;
+      let match;
+      while ((match = DURATION_RE.exec(text)) !== null) {
+        found = true;
+        const value = parseFloat(match[1]);
+        const unit = match[2].toLowerCase();
+        if (unit.startsWith("h")) total += value * 3600;
+        else if (unit.startsWith("m")) total += value * 60;
+        else total += value;
+      }
+      return found ? total : null;
     }
 
     function applySeek(seekToTs) {
@@ -225,14 +292,48 @@
     let finalTranscript = "";
     let spaceHeld = false;
     let micHeld = false;
+    let thinkingTimer = null;
 
     function setStatus(text, kind = "") {
       statusEl.textContent = text;
       statusEl.className = "status" + (kind ? " " + kind : "");
     }
 
+    function startThinkingStatus(baseText) {
+      const started = Date.now();
+      setStatus(baseText, "thinking");
+      if (thinkingTimer) clearInterval(thinkingTimer);
+      thinkingTimer = setInterval(() => {
+        const sec = ((Date.now() - started) / 1000).toFixed(1);
+        setStatus(`${baseText} (${sec}s)`, "thinking");
+      }, 200);
+    }
+
+    function stopThinkingStatus() {
+      if (thinkingTimer) {
+        clearInterval(thinkingTimer);
+        thinkingTimer = null;
+      }
+    }
+
+    function releaseControls(navigate) {
+      askInFlight = false;
+      micBtn.disabled = !titleSelect.value;
+      sendBtn.disabled = !titleSelect.value;
+      questionInput.disabled = !titleSelect.value;
+      if (pausedForAsk && !navigate) {
+        player.play().catch(() => {});
+        pausedForAsk = false;
+        resumeBtn.disabled = true;
+      }
+    }
+
     function speechSupported() {
-      return Boolean(SpeechRecognition) && Boolean(synth);
+      return Boolean(SpeechRecognition);
+    }
+
+    function ttsSupported() {
+      return Boolean(synth);
     }
 
     function setupRecognition() {
@@ -307,7 +408,7 @@
 
     function speakAnswer(text) {
       return new Promise((resolve) => {
-        if (!text || !synth) {
+        if (!text || !ttsSupported()) {
           resolve();
           return;
         }
@@ -320,6 +421,20 @@
       });
     }
 
+    /** Speak without blocking mic unlock / resume; update status when done. */
+    function speakAnswerInBackground(text, readyMessage) {
+      if (!text || !ttsSupported()) {
+        setStatus(readyMessage, "ok");
+        return;
+      }
+      setStatus("Speaking answer… (you can ask again)", "ok");
+      void speakAnswer(text).then(() => {
+        if (!askInFlight && !listening) {
+          setStatus(readyMessage, "ok");
+        }
+      });
+    }
+
     async function submitQuestion(question) {
       const titleId = titleSelect.value;
       if (!titleId || askInFlight) return;
@@ -327,9 +442,20 @@
       let navigate = isNavigationQuestion(question);
       askInFlight = true;
       micBtn.disabled = true;
+      sendBtn.disabled = true;
+      questionInput.disabled = true;
       questionText.textContent = question;
       answerText.textContent = "…";
-      setStatus(navigate ? "Finding that moment…" : "Thinking…", "thinking");
+
+      // Absolute clock/duration: seek immediately so jump feels instant.
+      const clientSeek = navigate ? parseClientSeekTimestamp(question) : null;
+      if (clientSeek != null) {
+        applySeek(clientSeek);
+        answerText.textContent = `Jumping to ${_formatTs(clientSeek)}…`;
+        startThinkingStatus(`Jumping to ${_formatTs(clientSeek)}`);
+      } else {
+        startThinkingStatus(navigate ? "Finding that moment…" : "Thinking…");
+      }
 
       try {
         const endpoint = navigate ? "/navigate" : "/ask";
@@ -347,29 +473,49 @@
         if (!response.ok) {
           throw new Error(data.detail || `${navigate ? "Navigate" : "Ask"} request failed`);
         }
-        answerText.textContent = data.answer;
+        stopThinkingStatus();
+        answerText.textContent = data.answer || "—";
+
         if (navigate && data.seek_to_ts != null) {
+          // Prefer server seek if it differs (events/semantic); re-apply client clock seeks too for consistency.
           applySeek(data.seek_to_ts);
+          releaseControls(true);
           setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
-          await speakAnswer(data.answer);
-          setStatus("Ready — hold Space or mic.", "ok");
+          speakAnswerInBackground(data.answer, "Ready — hold Space, mic, or type to ask again.");
           return;
         }
-        setStatus("Speaking answer…", "ok");
-        await speakAnswer(data.answer);
-        setStatus("Ready — hold Space or mic to ask again.", "ok");
+
+        if (navigate && clientSeek != null) {
+          releaseControls(true);
+          setStatus(`At ${_formatTs(clientSeek)}`, "ok");
+          speakAnswerInBackground(data.answer, "Ready — hold Space, mic, or type to ask again.");
+          return;
+        }
+
+        releaseControls(false);
+        speakAnswerInBackground(
+          data.answer,
+          "Ready — hold Space, mic, or type to ask again."
+        );
       } catch (err) {
+        stopThinkingStatus();
         answerText.textContent = "—";
         setStatus(err.message || "Something went wrong.", "error");
-      } finally {
-        askInFlight = false;
-        micBtn.disabled = !titleSelect.value;
-        if (pausedForAsk && !navigate) {
-          player.play().catch(() => {});
-          pausedForAsk = false;
-          resumeBtn.disabled = true;
-        }
+        releaseControls(!!navigate || clientSeek != null);
       }
+    }
+
+    function submitTypedQuestion() {
+      const question = (questionInput.value || "").trim();
+      if (!question || askInFlight) return;
+      capturedTs = player.currentTime || 0;
+      if (!player.paused && !isNavigationQuestion(question)) {
+        player.pause();
+        pausedForAsk = true;
+        resumeBtn.disabled = false;
+      }
+      questionInput.value = "";
+      void submitQuestion(question);
     }
 
     function _formatTs(seconds) {
@@ -384,7 +530,8 @@
     function beginAsk() {
       if (askInFlight || listening || !titleSelect.value) return;
       if (!speechSupported()) {
-        setStatus("Speech recognition not supported — use Chrome.", "error");
+        setStatus("Voice not available in this browser — type a question below.", "error");
+        questionInput.focus();
         return;
       }
 
@@ -404,7 +551,7 @@
       try {
         recognition.start();
       } catch (err) {
-        setStatus("Could not start microphone — check permissions.", "error");
+        setStatus("Could not start microphone — type a question below.", "error");
         maybeResumeAfterCancel();
       }
     }
@@ -439,8 +586,10 @@
         }
         titleSelect.disabled = false;
         micBtn.disabled = !speechSupported();
+        sendBtn.disabled = false;
+        questionInput.disabled = false;
         if (!speechSupported()) {
-          setStatus("Use Chrome for voice input.", "error");
+          setStatus("Voice unavailable — type questions, or use Chrome for mic.", "ok");
         } else {
           setStatus("Ready — pick a title and press play.", "ok");
         }
@@ -457,12 +606,16 @@
         player.removeAttribute("src");
         player.load();
         micBtn.disabled = true;
+        sendBtn.disabled = true;
+        questionInput.disabled = true;
         return;
       }
       player.src = `/video/${encodeURIComponent(titleId)}`;
       player.load();
       micBtn.disabled = !speechSupported();
-      setStatus(`Loaded ${titleId}. Press play, then hold Space or mic to ask.`, "ok");
+      sendBtn.disabled = false;
+      questionInput.disabled = false;
+      setStatus(`Loaded ${titleId}. Play, then hold Space/mic or type to ask.`, "ok");
     }
 
     micBtn.addEventListener("mousedown", (event) => {
@@ -513,8 +666,16 @@
       player.play().catch(() => {});
       pausedForAsk = false;
       resumeBtn.disabled = true;
-      synth.cancel();
+      if (synth) synth.cancel();
       setStatus("Playback resumed.", "ok");
+    });
+
+    sendBtn.addEventListener("click", () => submitTypedQuestion());
+    questionInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitTypedQuestion();
+      }
     });
 
     titleSelect.addEventListener("change", onTitleChange);

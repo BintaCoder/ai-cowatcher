@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import sessionmaker
 
 from ai_cowatcher import __version__
 from ai_cowatcher.api.catalog_routes import router as catalog_router
@@ -17,11 +18,13 @@ from ai_cowatcher.api.watch_routes import router as watch_router
 from ai_cowatcher.api.metrics_routes import router as metrics_router
 from ai_cowatcher.api.routes import router as ingest_router
 from ai_cowatcher.config import Settings, get_settings
-from ai_cowatcher.db.base import init_database
+from ai_cowatcher.db.base import create_db_engine, init_database
 from ai_cowatcher.agent.metrics import conversation_tier_counts, metrics_lite_summary
 from ai_cowatcher.health import collect_dependency_health, overall_status
 from ai_cowatcher.providers.litellm_env import configure_litellm_env
-from ai_cowatcher.realtime.viewing_session import build_viewing_session
+from ai_cowatcher.realtime.navigation_session import build_navigation_session
+from ai_cowatcher.realtime.viewing_session import _build_embedder, build_viewing_session
+from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +35,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        init_database(settings=settings)
-        logger.info("Warming real-time viewing session (embedder, stores, agent)")
-        app.state.viewing_session = build_viewing_session(settings)
+        # One engine + embedder + Qdrant client shared by /ask and /navigate.
+        engine = create_db_engine(settings=settings)
+        init_database(engine=engine, settings=settings)
+        session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+        embedder = _build_embedder(settings)
+        qdrant = QdrantSceneStore(settings)
+
+        logger.info("Warming real-time viewing + navigation sessions (shared embedder)")
+        app.state.viewing_session = build_viewing_session(
+            settings,
+            session_factory=session_factory,
+            embedder=embedder,
+            qdrant_store=qdrant,
+        )
+        app.state.navigation_session = build_navigation_session(
+            settings,
+            session_factory=session_factory,
+            embedder=embedder,
+            qdrant_store=qdrant,
+        )
         yield
 
     app = FastAPI(

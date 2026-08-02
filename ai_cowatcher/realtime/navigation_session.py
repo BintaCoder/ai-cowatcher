@@ -84,14 +84,26 @@ def _build_embedder(settings: Settings) -> TextEmbedder:
     return BgeM3Embedder(settings)
 
 
-def build_navigation_session(settings: Settings | None = None) -> NavigationSession:
+def build_navigation_session(
+    settings: Settings | None = None,
+    *,
+    session_factory: sessionmaker | None = None,
+    embedder: TextEmbedder | None = None,
+    qdrant_store: QdrantSceneStore | None = None,
+) -> NavigationSession:
+    """Build a navigation orchestrator.
+
+    Prefer injecting shared ``session_factory`` / ``embedder`` / ``qdrant_store``
+    (warmed once at app startup) so /navigate does not re-load models per request.
+    """
     settings = settings or get_settings()
-    engine = create_db_engine(settings=settings)
-    init_database(engine=engine, settings=settings)
-    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    if session_factory is None:
+        engine = create_db_engine(settings=settings)
+        init_database(engine=engine, settings=settings)
+        session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     return NavigationSession(
         settings=settings,
         session_factory=session_factory,
-        embedder=_build_embedder(settings),
-        qdrant_store=QdrantSceneStore(settings),
+        embedder=embedder or _build_embedder(settings),
+        qdrant_store=qdrant_store or QdrantSceneStore(settings),
     )

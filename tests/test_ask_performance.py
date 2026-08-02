@@ -57,17 +57,28 @@ def perf_session(perf_settings: Settings) -> ViewingSession:
     )
 
 
-def test_lifespan_builds_warm_viewing_session(
+def test_lifespan_builds_warm_viewing_and_navigation_sessions(
     perf_settings: Settings,
     perf_session: ViewingSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    nav = MagicMock(name="navigation_session")
     monkeypatch.setattr(
         "ai_cowatcher.main.build_viewing_session",
-        lambda _settings: perf_session,
+        lambda *_args, **_kwargs: perf_session,
     )
+    monkeypatch.setattr(
+        "ai_cowatcher.main.build_navigation_session",
+        lambda *_args, **_kwargs: nav,
+    )
+    monkeypatch.setattr("ai_cowatcher.main.create_db_engine", lambda *_a, **_k: MagicMock())
+    monkeypatch.setattr("ai_cowatcher.main.init_database", lambda *_a, **_k: None)
+    monkeypatch.setattr("ai_cowatcher.main._build_embedder", lambda *_a, **_k: MockTextEmbedder())
+    monkeypatch.setattr("ai_cowatcher.main.QdrantSceneStore", lambda *_a, **_k: MagicMock())
+
     with TestClient(create_app(perf_settings)) as client:
         assert client.app.state.viewing_session is perf_session
+        assert client.app.state.navigation_session is nav
 
 
 def test_ask_defers_memory_persist(perf_session: ViewingSession):

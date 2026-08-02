@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from ai_cowatcher.api.schemas import AskRequest, AskResponse
-from ai_cowatcher.config import Settings, get_settings
+from ai_cowatcher.observability.prometheus_metrics import record_ask_error
+from ai_cowatcher.realtime.viewing_session import ViewingSession, build_viewing_session
 
 router = APIRouter(tags=["ask"])
 
@@ -25,7 +28,9 @@ async def ask_question(
 ) -> AskResponse:
     session = _get_viewing_session(http_request)
     try:
-        result = session.ask(
+        # Sync agent work (LLM + tools + embed) must not block the event loop.
+        result = await asyncio.to_thread(
+            session.ask,
             title_id=request.title_id,
             current_ts=request.current_ts,
             question=request.question,
