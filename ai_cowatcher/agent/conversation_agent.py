@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from ai_cowatcher.agent.completion import CompletionClient, build_completion_client
+from ai_cowatcher.agent.completion import (
+    CompletionClient,
+    build_completion_client,
+    _chunk_text_for_stream,
+)
 from ai_cowatcher.agent.prompts import CONVERSATION_SYSTEM_PROMPT
+from ai_cowatcher.agent.stream_events import AskStreamEvent
 from ai_cowatcher.agent.tier_routing import TierRouter, build_tier_router
 from ai_cowatcher.agent.token_usage import TokenUsage
 from ai_cowatcher.agent.tools import (
@@ -30,6 +36,14 @@ logger = logging.getLogger(__name__)
 
 _MAX_TOOL_ROUNDS = 3
 _UNKNOWN_ANSWER = "I don't know yet based on what has aired so far."
+
+_TOOL_STATUS = {
+    "scene_lookup": "Searching scenes…",
+    "character_lookup": "Checking character history…",
+    "cast_lookup": "Looking up cast…",
+    "knowledge_search": "Searching production knowledge…",
+    "user_memory": "Recalling earlier conversation…",
+}
 
 
 @dataclass(frozen=True)
@@ -119,6 +133,138 @@ class ConversationAgent:
             total_tokens=usage.total_tokens,
         )
 
+    def answer_stream(
+        self,
+        *,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        user_id: str,
+        title_display_name: str | None = None,
+    ) -> Iterator[AskStreamEvent]:
+        """Yield progressive status/token events and a final ``done`` event."""
+        yield AskStreamEvent(type="status", message="Routing question…")
+
+        tier_selection = self._tier_router.select_tier(question)
+        tier_decision = tier_selection.decision
+        usage = tier_selection.usage or TokenUsage.empty()
+
+        confident_title = self._settings.resolve_title_display_name(
+            title_id, title_display_name
+        )
+        search_title = confident_title or self._settings.derive_title_from_id(title_id)
+
+        yield AskStreamEvent(type="status", message="Thinking…")
+
+        text, loop_usage, used_context = yield from self._run_tool_loop_stream(
+            question=question,
+            title_id=title_id,
+            current_ts=current_ts,
+            user_id=user_id,
+            tier_decision=tier_decision,
+            confident_title=confident_title,
+            search_title=search_title,
+        )
+        usage = usage.merge(loop_usage)
+
+        yield AskStreamEvent(
+            type="done",
+            answer=text,
+            model_tier=tier_decision.tier,
+            model_name=tier_decision.model,
+            escalation_reason=tier_decision.reason,
+            used_context=used_context,
+            # piggy-back token totals in detail as JSON would break scheme — add fields if needed
+        )
+        del usage
+
+    def _run_tool_loop_stream(
+        self,
+        *,
+        question: str,
+        title_id: str,
+        current_ts: float,
+        user_id: str,
+        tier_decision,
+        confident_title: str | None = None,
+        search_title: str | None = None,
+    ) -> Iterator[AskStreamEvent]:
+        """Yield stream events; return value is (text, usage, used_context)."""
+        messages = self._initial_messages(question, confident_title, search_title)
+        usage = TokenUsage.empty()
+        used_context = False
+        tools = self._available_tools()
+
+        for _ in range(_MAX_TOOL_ROUNDS):
+            result = self._completion.complete(
+                model=tier_decision.model,
+                messages=messages,
+                tools=tools,
+                temperature=self._settings.llm_temperature,
+                max_tokens=self._settings.llm_max_tokens,
+            )
+            usage = usage.merge(result.usage)
+
+            if not result.tool_calls:
+                answer_text = (result.content or "").strip() or _UNKNOWN_ANSWER
+                yield AskStreamEvent(type="status", message="Answering…")
+                for piece in _chunk_text_for_stream(answer_text):
+                    yield AskStreamEvent(type="token", text=piece)
+                return answer_text, usage, used_context
+
+            messages.append(self._assistant_tool_calls_message(result))
+            for tool_call in result.tool_calls:
+                status = _TOOL_STATUS.get(tool_call.name, f"Running {tool_call.name}…")
+                yield AskStreamEvent(type="status", message=status)
+                yield AskStreamEvent(type="tool_start", tool=tool_call.name, message=status)
+
+                payload, hit_context = self._dispatch_tool(
+                    tool_call,
+                    question=question,
+                    title_id=title_id,
+                    current_ts=current_ts,
+                    user_id=user_id,
+                    search_title=search_title,
+                )
+                if payload is None:
+                    logger.warning("Ignoring unsupported tool call: %s", tool_call.name)
+                    yield AskStreamEvent(
+                        type="tool_end",
+                        tool=tool_call.name,
+                        message=f"{tool_call.name} skipped",
+                    )
+                    continue
+
+                used_context = used_context or hit_context
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "content": json.dumps(payload),
+                    }
+                )
+                yield AskStreamEvent(
+                    type="tool_end",
+                    tool=tool_call.name,
+                    message=f"{tool_call.name} done",
+                )
+
+            yield AskStreamEvent(type="status", message="Composing answer…")
+
+        yield AskStreamEvent(type="status", message="Answering…")
+        parts: list[str] = []
+        for delta in self._completion.complete_stream(
+            model=tier_decision.model,
+            messages=messages,
+            temperature=self._settings.llm_temperature,
+            max_tokens=self._settings.llm_max_tokens,
+        ):
+            parts.append(delta)
+            yield AskStreamEvent(type="token", text=delta)
+        text = "".join(parts).strip() or _UNKNOWN_ANSWER
+        return text, usage, used_context
+
     def _run_tool_loop(
         self,
         *,
@@ -130,15 +276,7 @@ class ConversationAgent:
         confident_title: str | None = None,
         search_title: str | None = None,
     ) -> tuple[str, TokenUsage | None, bool]:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": CONVERSATION_SYSTEM_PROMPT}
-        ]
-        if self._cast_lookup is not None:
-            hint = self._cast_title_hint(confident_title, search_title)
-            if hint:
-                messages.append({"role": "system", "content": hint})
-        messages.append({"role": "user", "content": question})
-
+        messages = self._initial_messages(question, confident_title, search_title)
         usage = TokenUsage.empty()
         used_context = False
         tools = self._available_tools()
@@ -158,6 +296,7 @@ class ConversationAgent:
                     return result.content.strip(), usage, used_context
                 return _UNKNOWN_ANSWER, usage, used_context
 
+            messages.append(self._assistant_tool_calls_message(result))
             for tool_call in result.tool_calls:
                 payload, hit_context = self._dispatch_tool(
                     tool_call,
@@ -171,23 +310,6 @@ class ConversationAgent:
                     logger.warning("Ignoring unsupported tool call: %s", tool_call.name)
                     continue
                 used_context = used_context or hit_context
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": result.content,
-                        "tool_calls": [
-                            {
-                                "id": tool_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_call.name,
-                                    "arguments": json.dumps(tool_call.arguments),
-                                },
-                            }
-                        ],
-                    }
-                )
                 messages.append(
                     {
                         "role": "tool",
@@ -198,6 +320,40 @@ class ConversationAgent:
                 )
 
         return _UNKNOWN_ANSWER, usage, used_context
+
+    def _initial_messages(
+        self,
+        question: str,
+        confident_title: str | None,
+        search_title: str | None,
+    ) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": CONVERSATION_SYSTEM_PROMPT}
+        ]
+        if self._cast_lookup is not None:
+            hint = self._cast_title_hint(confident_title, search_title)
+            if hint:
+                messages.append({"role": "system", "content": hint})
+        messages.append({"role": "user", "content": question})
+        return messages
+
+    @staticmethod
+    def _assistant_tool_calls_message(result) -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": result.content,
+            "tool_calls": [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": json.dumps(tool_call.arguments),
+                    },
+                }
+                for tool_call in result.tool_calls
+            ],
+        }
 
     @staticmethod
     def _cast_title_hint(

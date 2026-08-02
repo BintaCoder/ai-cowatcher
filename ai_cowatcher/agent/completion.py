@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -37,6 +38,17 @@ class CompletionClient(Protocol):
         temperature: float = 0.2,
         max_tokens: int = 1024,
     ) -> CompletionResult:
+        ...
+
+    def complete_stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        """Yield text deltas for the final answer (no tool calls)."""
         ...
 
 
@@ -93,8 +105,47 @@ class LiteLLMCompletionClient:
             usage=usage_from_litellm_response(response),
         )
 
+    def complete_stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        response = litellm.completion(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        for chunk in response:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+            text = getattr(delta, "content", None)
+            if text:
+                yield text
+
 
 _UNKNOWN_PHRASE = "I don't know yet based on what has aired so far."
+
+
+def _chunk_text_for_stream(text: str) -> Iterator[str]:
+    """Yield small pieces so the UI can paint progressively in mock/tests."""
+    if not text:
+        return
+    # Prefer word-ish chunks so sentence TTS can kick in early.
+    parts = re.findall(r"\S+\s*", text)
+    if not parts:
+        yield text
+        return
+    for part in parts:
+        yield part
 
 
 class MockCompletionClient:
@@ -114,7 +165,23 @@ class MockCompletionClient:
     ) -> CompletionResult:
         self.models_used.append(model)
         del temperature, max_tokens, tools
+        return self._decide(messages)
 
+    def complete_stream(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+    ) -> Iterator[str]:
+        self.models_used.append(model)
+        del temperature, max_tokens
+        result = self._decide(messages)
+        content = (result.content or _UNKNOWN_PHRASE).strip()
+        yield from _chunk_text_for_stream(content)
+
+    def _decide(self, messages: list[dict[str, Any]]) -> CompletionResult:
         if messages and messages[-1].get("role") == "tool":
             question = _latest_user_message(messages)
             tool_content = messages[-1]["content"]

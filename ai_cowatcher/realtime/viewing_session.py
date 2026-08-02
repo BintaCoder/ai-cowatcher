@@ -159,6 +159,74 @@ class ViewingSession:
             total_tokens=answer.total_tokens,
         )
 
+    def ask_stream(
+        self,
+        *,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        user_id: str,
+        persist_memory: bool = True,
+    ):
+        """Yield AskStreamEvent objects; records telemetry and optional memory on done."""
+        from ai_cowatcher.agent.stream_events import AskStreamEvent
+
+        started = time.perf_counter()
+        title_display_name = self._lookup_title_display_name(title_id)
+        answer_text = ""
+
+        for event in self._agent.answer_stream(
+            title_id=title_id,
+            current_ts=current_ts,
+            question=question,
+            user_id=user_id,
+            title_display_name=title_display_name,
+        ):
+            if event.type == "token" and event.text:
+                answer_text += event.text
+            if event.type == "done":
+                latency_ms = (time.perf_counter() - started) * 1000.0
+                answer_text = (event.answer or answer_text).strip()
+                done_event = AskStreamEvent(
+                    type="done",
+                    answer=answer_text,
+                    title_id=title_id,
+                    user_id=user_id,
+                    current_ts=current_ts,
+                    model_tier=event.model_tier,
+                    model_name=event.model_name,
+                    escalation_reason=event.escalation_reason,
+                    used_context=event.used_context,
+                    latency_ms=round(latency_ms, 2),
+                )
+                record_ask_request(
+                    AskRecord(
+                        title_id=title_id,
+                        user_id=user_id,
+                        current_ts=current_ts,
+                        latency_ms=round(latency_ms, 2),
+                        model_tier=event.model_tier or "fast",
+                        model_name=event.model_name or "",
+                        escalation_reason=event.escalation_reason or "",
+                        used_context=bool(event.used_context),
+                        dont_know=is_dont_know_answer(answer_text),
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        total_tokens=None,
+                    )
+                )
+                if persist_memory:
+                    self.persist_memory(
+                        user_id=user_id,
+                        title_id=title_id,
+                        question=question,
+                        answer=answer_text,
+                        current_ts=current_ts,
+                    )
+                yield done_event
+            else:
+                yield event
+
 
 def _build_embedder(settings: Settings) -> TextEmbedder:
     if settings.mock_mode:

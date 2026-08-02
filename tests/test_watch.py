@@ -76,6 +76,8 @@ def test_watch_page_served(watch_client):
     assert "parseClientSeekTimestamp" in response.text
     assert "speakAnswerInBackground" in response.text
     assert "questionInput" in response.text
+    assert "/ask/stream" in response.text
+    assert "createSentenceSpeaker" in response.text
 
 
 def test_titles_endpoint_lists_completed(watch_client):

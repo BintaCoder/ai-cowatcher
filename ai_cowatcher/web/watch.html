@@ -412,7 +412,6 @@
           resolve();
           return;
         }
-        synth.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.rate = 1;
         utterance.onend = () => resolve();
@@ -433,6 +432,156 @@
           setStatus(readyMessage, "ok");
         }
       });
+    }
+
+    /** Progressive TTS: speak whole sentences as they complete during streaming. */
+    function createSentenceSpeaker(readyMessage) {
+      let buffer = "";
+      let speaking = false;
+      let finished = false;
+      const queue = [];
+
+      function pump() {
+        if (speaking) return;
+        const next = queue.shift();
+        if (!next) {
+          if (finished && !askInFlight && !listening) {
+            setStatus(readyMessage, "ok");
+          }
+          return;
+        }
+        speaking = true;
+        setStatus("Speaking answer… (you can ask again)", "ok");
+        void speakAnswer(next).then(() => {
+          speaking = false;
+          pump();
+        });
+      }
+
+      return {
+        pushChunk(text) {
+          if (!text || !ttsSupported()) return;
+          buffer += text;
+          const parts = buffer.split(/(?<=[.!?])\s+/);
+          if (parts.length < 2) return;
+          buffer = parts.pop() || "";
+          for (const sentence of parts) {
+            const trimmed = sentence.trim();
+            if (trimmed) queue.push(trimmed);
+          }
+          pump();
+        },
+        finish(fullText) {
+          finished = true;
+          const leftover = (buffer || "").trim();
+          buffer = "";
+          if (leftover) {
+            queue.push(leftover);
+          } else if (!queue.length && fullText && ttsSupported() && !speaking) {
+            // No sentence boundaries — speak full answer once.
+            queue.push(fullText.trim());
+          }
+          if (!ttsSupported()) {
+            setStatus(readyMessage, "ok");
+            return;
+          }
+          pump();
+        },
+        cancel() {
+          queue.length = 0;
+          buffer = "";
+          if (synth) synth.cancel();
+        },
+      };
+    }
+
+    async function streamAsk(titleId, question) {
+      const response = await fetch("/ask/stream", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          title_id: titleId,
+          current_ts: capturedTs,
+          question,
+          user_id: USER_ID,
+        }),
+      });
+      if (!response.ok) {
+        let detail = "Ask stream failed";
+        try {
+          const errBody = await response.json();
+          detail = errBody.detail || detail;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(detail);
+      }
+      if (!response.body) {
+        throw new Error("Streaming not supported by browser");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let answer = "";
+      let donePayload = null;
+      const readyMsg = "Ready — hold Space, mic, or type to ask again.";
+      const speaker = createSentenceSpeaker(readyMsg);
+      answerText.textContent = "";
+      let unlocked = false;
+
+      const unlockOnce = () => {
+        if (unlocked) return;
+        unlocked = true;
+        releaseControls(false);
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() || "";
+        for (const chunk of chunks) {
+          const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          let event;
+          try {
+            event = JSON.parse(line.slice(6));
+          } catch (_) {
+            continue;
+          }
+          if (event.type === "status" && event.message) {
+            startThinkingStatus(event.message);
+          } else if (event.type === "tool_start" && event.message) {
+            startThinkingStatus(event.message);
+          } else if (event.type === "token" && event.text) {
+            stopThinkingStatus();
+            answer += event.text;
+            answerText.textContent = answer;
+            speaker.pushChunk(event.text);
+            unlockOnce();
+          } else if (event.type === "done") {
+            stopThinkingStatus();
+            answer = event.answer || answer;
+            answerText.textContent = answer || "—";
+            donePayload = event;
+            unlockOnce();
+            speaker.finish(answer);
+          } else if (event.type === "error") {
+            speaker.cancel();
+            throw new Error(event.detail || event.message || "Ask failed");
+          }
+        }
+      }
+      if (!donePayload && !answer) {
+        throw new Error("Stream ended without an answer");
+      }
+      unlockOnce();
+      return { answer, done: donePayload };
     }
 
     async function submitQuestion(question) {
@@ -458,8 +607,12 @@
       }
 
       try {
-        const endpoint = navigate ? "/navigate" : "/ask";
-        const response = await fetch(endpoint, {
+        if (!navigate) {
+          await streamAsk(titleId, question);
+          return;
+        }
+
+        const response = await fetch("/navigate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -471,13 +624,12 @@
         });
         const data = await response.json();
         if (!response.ok) {
-          throw new Error(data.detail || `${navigate ? "Navigate" : "Ask"} request failed`);
+          throw new Error(data.detail || "Navigate request failed");
         }
         stopThinkingStatus();
         answerText.textContent = data.answer || "—";
 
-        if (navigate && data.seek_to_ts != null) {
-          // Prefer server seek if it differs (events/semantic); re-apply client clock seeks too for consistency.
+        if (data.seek_to_ts != null) {
           applySeek(data.seek_to_ts);
           releaseControls(true);
           setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
@@ -485,14 +637,14 @@
           return;
         }
 
-        if (navigate && clientSeek != null) {
+        if (clientSeek != null) {
           releaseControls(true);
           setStatus(`At ${_formatTs(clientSeek)}`, "ok");
           speakAnswerInBackground(data.answer, "Ready — hold Space, mic, or type to ask again.");
           return;
         }
 
-        releaseControls(false);
+        releaseControls(true);
         speakAnswerInBackground(
           data.answer,
           "Ready — hold Space, mic, or type to ask again."
