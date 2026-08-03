@@ -190,6 +190,9 @@
           <span id="listenBadgeText">Mic idle</span>
         </span>
         <label class="nav-toggle"><input id="navigationMode" type="checkbox" checked /> Navigate mode (jump to moments)</label>
+        <label class="nav-toggle" title="Lower video volume while you talk or wait for an answer">
+          <input id="duckWhileTalking" type="checkbox" checked /> Duck volume while talking
+        </label>
       </div>
       <div class="toolbar">
         <input id="questionInput" type="text" placeholder="Or type: “what just happened?” · “joke” · “go to 10:00”" autocomplete="off" />
@@ -198,7 +201,9 @@
       <p class="hint">
         Play any title — the mic stays open. Speak naturally about the show
         (<strong>who’s that?</strong> · <strong>what just happened?</strong> · <strong>joke</strong> · <strong>go to 10:00</strong>).
-        Filler and movie-bleed noise are ignored; headphones help. Mic uses short sessions (keeps the tab lighter).
+        Filler and movie-bleed noise are ignored; headphones help. While you talk (and during the answer),
+        video volume ducks smoothly when that option is on — like conversation awareness.
+        Mic uses short sessions (keeps the tab lighter).
         Typing still works if speech is unavailable.
       </p>
       <div id="status" class="status">Pick a title to start.</div>
@@ -225,6 +230,7 @@
     const sendBtn = document.getElementById("sendBtn");
     const questionInput = document.getElementById("questionInput");
     const navigationMode = document.getElementById("navigationMode");
+    const duckWhileTalking = document.getElementById("duckWhileTalking");
     const statusEl = document.getElementById("status");
     const questionText = document.getElementById("questionText");
     const answerText = document.getElementById("answerText");
@@ -238,6 +244,11 @@
     /** Rebuild SpeechRecognition periodically (handlers + internal buffers). */
     const RECREATE_AFTER_SESSIONS = 12;
     const MAX_STARTS_PER_MIN = 25;
+    /** Volume duck while user talks / ask / TTS (conversation-awareness style). */
+    const DUCK_FRACTION = 0.2;
+    const DUCK_MIN = 0.08;
+    const VOLUME_FADE_MS = 280;
+    const SPEECH_UNDUCK_DELAY_MS = 450;
 
     const NAV_INTENT_RE = /\b(go to|jump to|skip to|take me to|show me|find|where does|where is|when does|rewind|fast[\s-]?forward|seek)\b/i;
     const JOKE_INTENT_RE = /\b(tell me a joke|got a (?:good )?joke|make me laugh|say something funny|one[\s-]?liner|be funny|any jokes?|jokes?)\b/i;
@@ -336,6 +347,111 @@
     let activeStreamAbort = null;
     let activeSpeaker = null;
 
+    // Conversation-awareness volume duck ----------
+    let baseVolume = Math.min(1, Math.max(0.05, player.volume || 1));
+    let duckReasons = new Set(); // "speech" | "ask" | "tts"
+    let volumeFadeRaf = null;
+    let speechUnduckTimer = null;
+    let ignoringVolumeChange = false;
+
+    function duckEnabled() {
+      return !duckWhileTalking || duckWhileTalking.checked;
+    }
+
+    function captureBaseVolume() {
+      if (duckReasons.size > 0 || ignoringVolumeChange) return;
+      const v = player.volume;
+      if (typeof v === "number" && !Number.isNaN(v) && v >= 0) {
+        baseVolume = Math.min(1, Math.max(0.05, v));
+      }
+    }
+
+    function duckedTargetVolume() {
+      return Math.max(DUCK_MIN, Math.min(baseVolume, baseVolume * DUCK_FRACTION));
+    }
+
+    function fadePlayerVolume(target, durationMs = VOLUME_FADE_MS) {
+      if (volumeFadeRaf) {
+        cancelAnimationFrame(volumeFadeRaf);
+        volumeFadeRaf = null;
+      }
+      const start = player.volume;
+      const end = Math.min(1, Math.max(0, target));
+      if (Math.abs(start - end) < 0.01) {
+        ignoringVolumeChange = true;
+        player.volume = end;
+        ignoringVolumeChange = false;
+        return;
+      }
+      const t0 = performance.now();
+      function step(now) {
+        const t = Math.min(1, (now - t0) / Math.max(durationMs, 1));
+        // ease-out
+        const eased = 1 - (1 - t) * (1 - t);
+        ignoringVolumeChange = true;
+        player.volume = start + (end - start) * eased;
+        ignoringVolumeChange = false;
+        if (t < 1) {
+          volumeFadeRaf = requestAnimationFrame(step);
+        } else {
+          volumeFadeRaf = null;
+        }
+      }
+      volumeFadeRaf = requestAnimationFrame(step);
+    }
+
+    function syncDuckVolume() {
+      if (speechUnduckTimer) {
+        clearTimeout(speechUnduckTimer);
+        speechUnduckTimer = null;
+      }
+      if (!duckEnabled()) {
+        duckReasons.clear();
+        fadePlayerVolume(baseVolume);
+        return;
+      }
+      if (duckReasons.size > 0) {
+        fadePlayerVolume(duckedTargetVolume());
+      } else {
+        fadePlayerVolume(baseVolume);
+      }
+    }
+
+    function setDuckReason(reason, active) {
+      if (!duckEnabled() && active) return;
+      if (active) {
+        if (duckReasons.size === 0) captureBaseVolume();
+        duckReasons.add(reason);
+        syncDuckVolume();
+        return;
+      }
+      duckReasons.delete(reason);
+      // Mild delay unduck after speech so a brief pause mid-phrase doesn't pop volume up.
+      if (reason === "speech" && duckReasons.size === 0) {
+        if (speechUnduckTimer) clearTimeout(speechUnduckTimer);
+        speechUnduckTimer = setTimeout(() => {
+          speechUnduckTimer = null;
+          if (duckReasons.size === 0) fadePlayerVolume(baseVolume);
+        }, SPEECH_UNDUCK_DELAY_MS);
+        return;
+      }
+      syncDuckVolume();
+    }
+
+    player.addEventListener("volumechange", () => {
+      if (ignoringVolumeChange || duckReasons.size > 0) return;
+      captureBaseVolume();
+    });
+
+    if (duckWhileTalking) {
+      duckWhileTalking.addEventListener("change", () => {
+        if (!duckWhileTalking.checked) {
+          duckReasons.clear();
+          fadePlayerVolume(baseVolume);
+        }
+      });
+    }
+
     function setStatus(text, kind = "") {
       statusEl.textContent = text;
       statusEl.className = "status" + (kind ? " " + kind : "");
@@ -368,6 +484,8 @@
       askInFlight = false;
       sendBtn.disabled = !titleSelect.value;
       questionInput.disabled = !titleSelect.value;
+      // Keep duck if TTS is about to/while speaking; otherwise restore.
+      if (!ttsSpeaking) setDuckReason("ask", false);
       scheduleListenRestart(LISTEN_COOLDOWN_MS);
     }
 
@@ -390,6 +508,7 @@
         try { synth.cancel(); } catch (_) {}
       }
       ttsSpeaking = false;
+      setDuckReason("tts", false);
     }
 
     function disposeRecognition() {
@@ -397,6 +516,7 @@
         clearTimeout(restartListenTimer);
         restartListenTimer = null;
       }
+      setDuckReason("speech", false);
       if (!recognition) {
         listening = false;
         return;
@@ -405,6 +525,8 @@
       recognition = null;
       listening = false;
       rec.onstart = null;
+      rec.onspeechstart = null;
+      rec.onspeechend = null;
       rec.onresult = null;
       rec.onerror = null;
       rec.onend = null;
@@ -452,6 +574,20 @@
         }
       };
 
+      // Best-effort speech edge events (Chrome); volume ducks as soon as talk begins.
+      rec.onspeechstart = () => {
+        if (askInFlight || ttsSpeaking) return;
+        setDuckReason("speech", true);
+        updateListenBadge("on", "You're talking…");
+      };
+
+      rec.onspeechend = () => {
+        // Keep duck if ask is about to fire; release speech reason after delay otherwise.
+        if (!askInFlight && !ttsSpeaking) {
+          setDuckReason("speech", false);
+        }
+      };
+
       rec.onresult = (event) => {
         if (askInFlight || ttsSpeaking) return;
         let interim = "";
@@ -460,6 +596,8 @@
           const alt = result[0];
           const text = (alt.transcript || "").trim();
           if (!text) continue;
+          // Backup duck trigger when onspeechstart is missing (Safari / some engines).
+          setDuckReason("speech", true);
           if (result.isFinal) {
             sessionTranscript = `${sessionTranscript} ${text}`.trim();
             if (typeof alt.confidence === "number" && alt.confidence > 0) {
@@ -478,6 +616,7 @@
 
       rec.onerror = (event) => {
         listening = false;
+        setDuckReason("speech", false);
         // Do NOT rapid-restart on no-speech — that pattern leaks in Chromium.
         if (event.error === "no-speech" || event.error === "aborted") {
           scheduleListenRestart(LISTEN_COOLDOWN_MS);
@@ -501,9 +640,13 @@
         sessionConfidence = 0;
 
         if (question && !askInFlight && !ttsSpeaking) {
+          // Hand off duck from "speech" → "ask" so volume stays low through thinking.
+          setDuckReason("ask", true);
+          setDuckReason("speech", false);
           void handleHeardSpeech(question, conf);
           return;
         }
+        setDuckReason("speech", false);
         if (shouldBeListening()) {
           scheduleListenRestart(LISTEN_COOLDOWN_MS);
         } else if (ttsSpeaking) {
@@ -561,11 +704,15 @@
       if (conf > 0 && conf < 0.25) {
         questionText.textContent = question;
         setStatus("Heard unclear speech — still listening next round.", "ok");
+        setDuckReason("ask", false);
+        setDuckReason("speech", false);
         scheduleListenRestart(LISTEN_COOLDOWN_MS);
         return;
       }
       if (isClientNoise(question)) {
         setStatus("Listening… (ignored filler)", "ok");
+        setDuckReason("ask", false);
+        setDuckReason("speech", false);
         scheduleListenRestart(LISTEN_COOLDOWN_MS);
         return;
       }
@@ -577,9 +724,14 @@
       ttsSpeaking = active;
       if (active) {
         disposeRecognition();
+        setDuckReason("tts", true);
+        setDuckReason("ask", false);
         updateListenBadge("off", "Speaking…");
-      } else if (shouldBeListening()) {
-        scheduleListenRestart(LISTEN_COOLDOWN_MS);
+      } else {
+        setDuckReason("tts", false);
+        if (shouldBeListening()) {
+          scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        }
       }
     }
 
@@ -754,12 +906,16 @@
         questionText.textContent = question || "—";
         answerText.textContent = "—";
         setStatus("Listening… (ignored filler)", "ok");
+        setDuckReason("ask", false);
+        setDuckReason("speech", false);
         scheduleListenRestart(LISTEN_COOLDOWN_MS);
         return;
       }
 
       const navigate = isNavigationQuestion(question);
       askInFlight = true;
+      setDuckReason("ask", true);
+      setDuckReason("speech", false);
       disposeRecognition();
       updateListenBadge("off", "Thinking…");
       sendBtn.disabled = true;
@@ -792,6 +948,8 @@
       } catch (err) {
         stopThinkingStatus();
         answerText.textContent = "—";
+        setDuckReason("ask", false);
+        setDuckReason("tts", false);
         if (err && err.name === "AbortError") {
           setStatus("Request cancelled.", "ok");
         } else {
