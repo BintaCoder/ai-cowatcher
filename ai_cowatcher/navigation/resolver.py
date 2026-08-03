@@ -88,8 +88,13 @@ class NavigationResolver:
 
     def _resolve_actor(self, title_id: str, question: str) -> NavigateResult | None:
         actor_name = _extract_actor_name(question)
-        if actor_name is None and self._cast_lookup and self._title_display_name:
-            actor_name = _match_cast_in_question(question, self._cast_lookup, self._title_display_name)
+        if actor_name is None and self._cast_lookup:
+            actor_name = _match_cast_in_question(
+                question,
+                self._cast_lookup,
+                title_id=title_id,
+                title_name=self._title_display_name,
+            )
         if not actor_name:
             return None
 
@@ -154,9 +159,16 @@ def _extract_actor_name(question: str) -> str | None:
 
 
 def _match_cast_in_question(
-    question: str, cast_lookup: CastLookupTool, title_name: str
+    question: str,
+    cast_lookup: CastLookupTool,
+    *,
+    title_id: str,
+    title_name: str | None,
 ) -> str | None:
-    result = cast_lookup.lookup(title_name=title_name)
+    result = cast_lookup.lookup(
+        title_id=title_id,
+        title_name=title_name or "",
+    )
     if "error" in result:
         return None
     lower = question.lower()

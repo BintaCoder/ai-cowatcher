@@ -236,7 +236,8 @@ Watch UI detects navigate intents (clock, “Nth fight”, credits, “where doe
 | **Utterance gate** | Free heuristics for clear filler/social/navigate; **merged** strategy = single LLM call with first-line intent tags `[FILLER]`/`[SOCIAL]`/`[JOKE]`/`[NAVIGATE]`/`[CONTENT]` then answer in the same stream (`UTTERANCE_GATE_STRATEGY=merged`) |
 | **Joke** | Explicit phrases or `[JOKE]` tag → short scene-grounded line |
 | **Multimodal** | After scene tools return `audio_object_key`, load ≤ `MULTIMODAL_MAX_CLIPS` WAVs → LiteLLM multimodal messages (`input_audio`) |
-| **Q&A cache** | Exact (Redis/memory) + semantic (Qdrant `qa_cache`); skips retrieval + LLM on hit within the same 30s playhead bucket |
+| **Cast** | Extracted once at **ingest** from TMDB → stored on `title_ingestions.cast_cache` + Redis hot cache; `cast_lookup` serves cache at ask-time (live TMDB only on miss) |
+| **Q&A cache** | Exact (Redis/memory) + semantic (Qdrant `qa_cache`); skips retrieval + LLM on hit within same 30s playhead bucket |
 | **Grounding fallback** | If model refuses but tools have text → grounded short rewrite |
 
 ---

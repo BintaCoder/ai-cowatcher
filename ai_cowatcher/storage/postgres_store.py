@@ -26,6 +26,34 @@ class SceneEventRepository:
             return None
         return title.display_name
 
+    def get_cast_cache(self, title_id: str) -> dict | None:
+        """Return ingested cast payload for a title, or None if missing."""
+        with observe_storage_query("postgres", "get_cast_cache"):
+            title = self.get_title(title_id)
+        if title is None:
+            return None
+        payload = getattr(title, "cast_cache", None)
+        if not payload or not isinstance(payload, dict):
+            return None
+        return dict(payload)
+
+    def save_cast_cache(self, title_id: str, cast_payload: dict) -> None:
+        """Persist full cast list extracted during offline ingest."""
+        title = self.get_title(title_id)
+        if title is None:
+            raise ValueError(f"Unknown title_id {title_id}")
+        title.cast_cache = dict(cast_payload)
+        title.cast_cached_at = datetime.now(UTC)
+        self._session.commit()
+
+    def clear_cast_cache(self, title_id: str) -> None:
+        title = self.get_title(title_id)
+        if title is None:
+            return
+        title.cast_cache = None
+        title.cast_cached_at = None
+        self._session.commit()
+
     def set_display_name(self, title_id: str, display_name: str) -> None:
         title = self.get_title(title_id)
         if title is None:

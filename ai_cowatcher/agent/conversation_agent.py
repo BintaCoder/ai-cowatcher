@@ -1222,6 +1222,7 @@ class ConversationAgent:
                 )
                 year = tool_call.arguments.get("year")
                 result = self._cast_lookup.lookup(
+                    title_id=title_id,
                     title_name=title_name,
                     year=int(year) if isinstance(year, (int, str)) and str(year).isdigit() else None,
                 )

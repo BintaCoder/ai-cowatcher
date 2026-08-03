@@ -17,7 +17,11 @@ from ai_cowatcher.interfaces import TextEmbedder
 from ai_cowatcher.observability.ask_telemetry import AskRecord, is_dont_know_answer, record_ask_request
 from ai_cowatcher.providers import mock
 from ai_cowatcher.providers.real import BgeM3Embedder
-from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
+from ai_cowatcher.retrieval.cast_lookup import (
+    CastLookupTool,
+    CastRedisCache,
+    build_cast_redis_cache,
+)
 from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
 from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
 from ai_cowatcher.retrieval.scene_lookup import SceneLookupTool
@@ -32,6 +36,21 @@ from ai_cowatcher.storage.user_memory_store import UserMemoryStore, build_user_m
 from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger(__name__)
+
+
+class _SessionCastStore:
+    """Opens a short-lived DB session for cast cache reads/writes."""
+
+    def __init__(self, session_factory: sessionmaker) -> None:
+        self._session_factory = session_factory
+
+    def get_cast_cache(self, title_id: str) -> dict | None:
+        with self._session_factory() as session:
+            return SceneEventRepository(session).get_cast_cache(title_id)
+
+    def save_cast_cache(self, title_id: str, cast_payload: dict) -> None:
+        with self._session_factory() as session:
+            SceneEventRepository(session).save_cast_cache(title_id, cast_payload)
 
 
 @dataclass
@@ -445,13 +464,17 @@ def build_viewing_session(
         logger.info("Embedding model warmed")
     scene_lookup = SceneLookupTool(embedder, qdrant, settings)
     knowledge_search = KnowledgeSearchTool(embedder, knowledge_qdrant, settings)
-    cast_lookup = CastLookupTool(settings) if settings.cast_lookup_enabled else None
-    store = character_store or build_character_store(settings)
-    character_lookup = CharacterLookupTool(store)
     if session_factory is None:
         engine = create_db_engine(settings=settings)
         init_database(engine=engine, settings=settings)
         session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    cast_lookup = CastLookupTool(
+        settings,
+        store=_SessionCastStore(session_factory),
+        redis_cache=build_cast_redis_cache(settings),
+    )
+    store = character_store or build_character_store(settings)
+    character_lookup = CharacterLookupTool(store)
     memory_store = user_memory_store or build_user_memory_store(settings, session_factory)
     objects = object_store or build_object_store(settings)
     agent = build_conversation_agent(

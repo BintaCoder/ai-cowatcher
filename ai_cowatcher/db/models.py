@@ -38,6 +38,14 @@ class TitleIngestion(Base):
         back_populates="title",
         cascade="all, delete-orphan",
     )
+    # Public cast list extracted from TMDB (or equivalent) during offline ingest.
+    # Shape: {"title": str, "media_type": str, "cast": [{"actor","character"}], ...}
+    cast_cache: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=True
+    )
+    cast_cached_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class TitleEvent(Base):

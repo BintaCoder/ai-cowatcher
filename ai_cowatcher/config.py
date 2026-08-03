@@ -233,6 +233,10 @@ class Settings(BaseSettings):
     # networks; retry transient connection failures before giving up.
     tmdb_max_retries: int = Field(default=5, alias="TMDB_MAX_RETRIES")
     tmdb_retry_backoff_sec: float = Field(default=0.5, alias="TMDB_RETRY_BACKOFF_SEC")
+    # Hot cache TTL for cast after ingest/write-through (Redis).
+    cast_cache_redis_ttl_sec: int = Field(
+        default=7 * 24 * 3600, alias="CAST_CACHE_REDIS_TTL_SEC"
+    )
     # JSON map of internal title_id -> human title used for TMDB search,
     # e.g. {"demo": "Kids", "thriller-001": "Knives Out (2019)"}
     title_names: str = Field(default="{}", alias="TITLE_NAMES")
@@ -298,8 +302,8 @@ class Settings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cast_lookup_enabled(self) -> bool:
-        """Cast lookup is available only with a TMDB key and outside mock mode."""
-        return bool(self.tmdb_api_key) and not self.mock_mode
+        """Cast tool is always attached: prefer ingest cache; fall back to TMDB when keyed."""
+        return True
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -31,8 +31,8 @@ CAST_LOOKUP_TOOL = {
         "description": (
             "Look up the public cast/actor list for the title the viewer is watching. "
             "Use this when the viewer asks who an actor is, who plays a character, or "
-            "for the names of the actors. Cast lists are public information and are not "
-            "plot spoilers. Returns actors and the characters they play."
+            "for the names of the actors. Cast is extracted at ingest and served from "
+            "cache (not a live web call). Cast lists are public and are not plot spoilers."
         ),
         "parameters": {
             "type": "object",

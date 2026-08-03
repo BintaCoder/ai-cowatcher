@@ -37,6 +37,22 @@ def _apply_lightweight_migrations(engine) -> None:
     """Pilot-safe additive migrations (no Alembic yet)."""
     dialect = engine.dialect.name
     with engine.begin() as conn:
+        if dialect == "sqlite":
+            # SQLite: no IF NOT EXISTS for ADD COLUMN on many versions — try/ignore.
+            for stmt in (
+                "ALTER TABLE title_ingestions ADD COLUMN display_name VARCHAR(512)",
+                "ALTER TABLE title_ingestions ADD COLUMN credits_start_ts FLOAT",
+                "ALTER TABLE title_ingestions ADD COLUMN cast_cache TEXT",
+                "ALTER TABLE title_ingestions ADD COLUMN cast_cached_at DATETIME",
+                "ALTER TABLE scene_events ADD COLUMN speaker_cluster_ids TEXT DEFAULT '[]'",
+                "ALTER TABLE scene_events ADD COLUMN audio_object_key VARCHAR(512)",
+            ):
+                try:
+                    conn.execute(text(stmt))
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
         conn.execute(
             text(
                 "ALTER TABLE title_ingestions "
@@ -49,36 +65,27 @@ def _apply_lightweight_migrations(engine) -> None:
                 "ADD COLUMN IF NOT EXISTS credits_start_ts DOUBLE PRECISION"
             )
         )
-        if dialect == "sqlite":
-            # SQLite lacks IF NOT EXISTS for ADD COLUMN on older versions; ignore duplicates.
-            try:
-                conn.execute(
-                    text(
-                        "ALTER TABLE scene_events "
-                        "ADD COLUMN speaker_cluster_ids TEXT DEFAULT '[]'"
-                    )
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                conn.execute(
-                    text(
-                        "ALTER TABLE scene_events "
-                        "ADD COLUMN audio_object_key VARCHAR(512)"
-                    )
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        else:
-            conn.execute(
-                text(
-                    "ALTER TABLE scene_events "
-                    "ADD COLUMN IF NOT EXISTS speaker_cluster_ids JSONB DEFAULT '[]'::jsonb"
-                )
+        conn.execute(
+            text(
+                "ALTER TABLE scene_events "
+                "ADD COLUMN IF NOT EXISTS speaker_cluster_ids JSONB DEFAULT '[]'::jsonb"
             )
-            conn.execute(
-                text(
-                    "ALTER TABLE scene_events "
-                    "ADD COLUMN IF NOT EXISTS audio_object_key VARCHAR(512)"
-                )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE scene_events "
+                "ADD COLUMN IF NOT EXISTS audio_object_key VARCHAR(512)"
             )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE title_ingestions "
+                "ADD COLUMN IF NOT EXISTS cast_cache JSONB"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE title_ingestions "
+                "ADD COLUMN IF NOT EXISTS cast_cached_at TIMESTAMPTZ"
+            )
+        )

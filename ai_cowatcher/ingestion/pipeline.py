@@ -19,7 +19,13 @@ from ai_cowatcher.ingestion.knowledge_index import index_title_knowledge
 from ai_cowatcher.ingestion.transcription import transcripts_for_scenes
 from ai_cowatcher.providers.factory import IngestionProviders, build_ingestion_providers
 from ai_cowatcher.providers.litellm_env import configure_litellm_env
-from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
+from ai_cowatcher.retrieval.cast_lookup import (
+    CastLookupTool,
+    CastRedisCache,
+    actor_names_from_payload,
+    build_cast_redis_cache,
+    extract_cast_for_title,
+)
 from ai_cowatcher.storage.object_store import (
     ObjectStore,
     build_object_store,
@@ -49,6 +55,7 @@ class IngestionPipeline:
         session_factory: sessionmaker | None = None,
         qdrant_store: QdrantSceneStore | None = None,
         object_store: ObjectStore | None = None,
+        cast_redis: CastRedisCache | None = None,
     ):
         self._settings = settings or get_settings()
         self._providers = providers or build_ingestion_providers(self._settings)
@@ -59,6 +66,11 @@ class IngestionPipeline:
         self._session_factory = session_factory
         self._qdrant = qdrant_store or QdrantSceneStore(self._settings)
         self._object_store = object_store or build_object_store(self._settings)
+        self._cast_redis = (
+            cast_redis
+            if cast_redis is not None
+            else build_cast_redis_cache(self._settings)
+        )
 
     def run(
         self,
@@ -90,6 +102,8 @@ class IngestionPipeline:
                     self._object_store.delete_prefix(f"scenes/{title_id}/")
                 except Exception:  # noqa: BLE001
                     logger.exception("Failed to delete scene audio for title %s", title_id)
+                if self._cast_redis is not None:
+                    self._cast_redis.delete(title_id)
 
             existing_scene_ids = repo.get_existing_scene_ids(title_id)
             resuming = bool(existing_scene_ids)
@@ -106,6 +120,8 @@ class IngestionPipeline:
                 newly_processed = self._process_video(
                     title_id, str(video), repo, existing_scene_ids
                 )
+                # Cast once per title — used by nav indexing, character graph, and /ask.
+                self._extract_and_cache_cast(title_id, repo)
                 self._index_navigation_events(title_id, repo)
                 self._index_character_graph(title_id, repo)
                 self._index_title_knowledge(title_id)
@@ -235,6 +251,85 @@ class IngestionPipeline:
             )
             return None
 
+    def _extract_and_cache_cast(
+        self, title_id: str, repo: SceneEventRepository
+    ) -> dict | None:
+        """Fetch public cast during ingest and store for fast real-time lookup."""
+        display_name = repo.get_display_name(title_id)
+        search_name = display_name or self._settings.effective_search_title(title_id)
+        if not search_name:
+            logger.info("No display/search name for cast extract title=%s", title_id)
+            return None
+
+        # Allow re-ingest force path to refresh; still skip duplicate TMDB if present
+        # unless force wiped the row (delete_title_data clears cast with the title).
+        existing = repo.get_cast_cache(title_id)
+        if existing and existing.get("cast") and not self._settings.mock_mode:
+            # Warm Redis even when DB already has it (resume path).
+            if self._cast_redis is not None:
+                self._cast_redis.set(title_id, existing)
+            logger.info(
+                "Cast already cached for %s (%d actors)",
+                title_id,
+                len(existing.get("cast") or []),
+            )
+            return existing
+
+        if self._settings.mock_mode:
+            # Deterministic mock cast so offline pilots still exercise the cache path.
+            payload = {
+                "title": search_name,
+                "media_type": "movie",
+                "tmdb_id": None,
+                "cast": [
+                    {"actor": "Mock Actor One", "character": "Lead"},
+                    {"actor": "Mock Actor Two", "character": "Supporting"},
+                ],
+                "source": "mock_ingest",
+            }
+            repo.save_cast_cache(title_id, payload)
+            if self._cast_redis is not None:
+                self._cast_redis.set(title_id, payload)
+            logger.info("Cached mock cast for title %s", title_id)
+            return payload
+
+        if not self._settings.tmdb_api_key:
+            logger.warning(
+                "TMDB_API_KEY missing — skipping cast extract for title %s", title_id
+            )
+            return None
+
+        try:
+            result = extract_cast_for_title(
+                self._settings, title_name=search_name
+            )
+        except Exception:  # noqa: BLE001 — cast is optional; don't fail ingest
+            logger.exception("Cast extract failed for title %s", title_id)
+            return None
+
+        if "error" in result or not result.get("cast"):
+            logger.warning(
+                "Cast extract empty for title %s name=%r: %s",
+                title_id,
+                search_name,
+                result.get("error"),
+            )
+            return None
+
+        payload = dict(result)
+        payload["source"] = "ingest"
+        payload["search_name"] = search_name
+        repo.save_cast_cache(title_id, payload)
+        if self._cast_redis is not None:
+            self._cast_redis.set(title_id, payload)
+        logger.info(
+            "Cached cast for title %s (%d actors) from TMDB match %r",
+            title_id,
+            len(payload.get("cast") or []),
+            payload.get("title"),
+        )
+        return payload
+
     def _index_navigation_events(self, title_id: str, repo: SceneEventRepository) -> None:
         scenes = repo.list_scene_records(title_id)
         if not scenes:
@@ -253,17 +348,12 @@ class IngestionPipeline:
         )
 
     def _cast_names(self, title_id: str, repo: SceneEventRepository) -> list[str]:
-        display_name = repo.get_display_name(title_id)
-        if not (display_name and self._settings.cast_lookup_enabled):
-            return []
-        cast_result = CastLookupTool(self._settings).lookup(title_name=display_name)
-        if "cast" not in cast_result:
-            return []
-        return [
-            str(entry.get("actor", ""))
-            for entry in cast_result["cast"]
-            if entry.get("actor")
-        ]
+        payload = repo.get_cast_cache(title_id)
+        if payload:
+            return actor_names_from_payload(payload)
+        # Fallback: extract now if not yet cached (older resumed path).
+        payload = self._extract_and_cache_cast(title_id, repo)
+        return actor_names_from_payload(payload)
 
     def _index_character_graph(self, title_id: str, repo: SceneEventRepository) -> None:
         """Offline character-intelligence enrichment (LangGraph -> Neo4j)."""
