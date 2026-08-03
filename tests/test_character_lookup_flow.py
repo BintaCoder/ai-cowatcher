@@ -50,7 +50,11 @@ def _scenes() -> list[SceneEventRecord]:
 
 @pytest.fixture
 def agent() -> ConversationAgent:
-    settings = Settings(MOCK_MODE=True, QDRANT_COLLECTION=f"test_char_{uuid.uuid4().hex[:8]}")
+    settings = Settings(
+        MOCK_MODE=True,
+        UTTERANCE_GATE_STRATEGY="prompt",
+        QDRANT_COLLECTION=f"test_char_{uuid.uuid4().hex[:8]}",
+    )
 
     scenes = _scenes()
     characters = link_identities(TITLE, scenes, min_cooccur=1)

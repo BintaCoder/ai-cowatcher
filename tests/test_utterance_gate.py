@@ -54,6 +54,22 @@ def test_content_not_short_circuit(gate_settings: Settings):
     assert decision.short_circuit is False
 
 
+def test_merged_strategy_defers_ambiguous_to_agent():
+    settings = Settings(
+        MOCK_MODE=True,
+        UTTERANCE_GATE_ENABLED=True,
+        UTTERANCE_GATE_STRATEGY="merged",
+    )
+    decision = classify_utterance(
+        "purple banana twelve",
+        settings=settings,
+        completion=MockCompletionClient(),
+    )
+    assert decision.action == "content"
+    assert decision.reason == "gate:merged_pending"
+    assert decision.short_circuit is False
+
+
 def test_prompt_strategy_on_ambiguous():
     settings = Settings(
         MOCK_MODE=True,
@@ -61,7 +77,6 @@ def test_prompt_strategy_on_ambiguous():
         UTTERANCE_GATE_STRATEGY="prompt",
     )
     client = MockCompletionClient()
-    # No content markers — mock gate returns NO for short babble without cues
     decision = classify_utterance(
         "purple banana twelve",
         settings=settings,
@@ -70,20 +85,9 @@ def test_prompt_strategy_on_ambiguous():
     assert decision.action == "ignore"
     assert "prompt" in decision.reason
 
-    meaningful = classify_utterance(
-        "was that the same guy from before with no other cues",
-        settings=settings,
-        completion=client,
-    )
-    # may be content via "was that" / who-like or prompt YES from mock if has "who" - this string has none of mock tokens
-    # mock returns YES only for what/who/how/etc — this has none → NO → ignore
-    # "from before" might not match CONTENT. Let's use something ambiguous the mock maps YES via length+?
     yes_case = classify_utterance(
         "is he the same person?",
         settings=settings,
         completion=client,
     )
-    # CONTENT marker "same" won't match, but "is he" is covered by is
-    # or prompt mock: contains "he" is not enough — has "is he" with _CONTENT is
-    # matches "is\s+(?:he|...)"
     assert yes_case.action == "content"

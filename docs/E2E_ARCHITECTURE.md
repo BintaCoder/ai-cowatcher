@@ -233,10 +233,10 @@ Watch UI detects navigate intents (clock, “Nth fight”, credits, “where doe
 |------|----------|
 | **`POST /ask`** | Full JSON `AgentAnswer` after tool loop |
 | **`POST /ask/stream`** | SSE: `status`, `tool_start`/`tool_end`, `token`, `done`/`error`; memory deferred off critical path |
-| **Utterance gate** | Heuristic first; optional ambiguous YES/NO on fast model (`UTTERANCE_GATE_STRATEGY`) |
-| **Joke** | Explicit phrases → force scene ground + joke system prompt + brevity cap |
+| **Utterance gate** | Free heuristics for clear filler/social/navigate; **merged** strategy = single LLM call with first-line intent tags `[FILLER]`/`[SOCIAL]`/`[JOKE]`/`[NAVIGATE]`/`[CONTENT]` then answer in the same stream (`UTTERANCE_GATE_STRATEGY=merged`) |
+| **Joke** | Explicit phrases or `[JOKE]` tag → short scene-grounded line |
 | **Multimodal** | After scene tools return `audio_object_key`, load ≤ `MULTIMODAL_MAX_CLIPS` WAVs → LiteLLM multimodal messages (`input_audio`) |
-| **Brevity** | Default one short sentence (~28 words); detail only if user asks; jokes shorter |
+| **Q&A cache** | Exact (Redis/memory) + semantic (Qdrant `qa_cache`); skips retrieval + LLM on hit within the same 30s playhead bucket |
 | **Grounding fallback** | If model refuses but tools have text → grounded short rewrite |
 
 ---
@@ -373,7 +373,7 @@ user_conversation_turns (+ Redis cache)
 | Multimodal | `MULTIMODAL_SCENE_AUDIO_ENABLED`, `MULTIMODAL_MAX_CLIPS` |
 | Scene audio | `SCENE_AUDIO_ENABLED`, `SCENE_AUDIO_MAX_SEC` |
 | Object store | `OBJECT_STORE_BACKEND` (`local`\|`minio`), `OBJECT_STORE_LOCAL_DIR`, `MINIO_*` |
-| Utterance gate | `UTTERANCE_GATE_ENABLED`, `UTTERANCE_GATE_STRATEGY` |
+| Utterance gate | `UTTERANCE_GATE_ENABLED`, `UTTERANCE_GATE_STRATEGY` (`heuristic` \| `prompt` \| **`merged`**) |
 | Embeddings | `EMBEDDING_MODEL`, `EMBEDDING_DEVICE` |
 | Broker | `MESSAGE_BROKER` |
 

@@ -74,10 +74,10 @@ def test_watch_page_served(watch_client):
     assert "Co-watcher" in response.text
     assert "SpeechRecognition" in response.text
     assert "parseClientSeekTimestamp" in response.text
-    assert "speakAnswerInBackground" in response.text
+    assert "speakOnce" in response.text
     assert "questionInput" in response.text
     assert "/ask/stream" in response.text
-    assert "createSentenceSpeaker" in response.text
+    assert "streamAsk" in response.text
 
 
 def test_titles_endpoint_lists_completed(watch_client):

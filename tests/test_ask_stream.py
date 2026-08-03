@@ -33,7 +33,11 @@ def _parse_sse(body: str) -> list[dict]:
 
 @pytest.fixture
 def stream_settings() -> Settings:
-    return Settings(MOCK_MODE=True, QDRANT_COLLECTION=f"test_ask_stream_{uuid.uuid4().hex[:8]}")
+    return Settings(
+        MOCK_MODE=True,
+        UTTERANCE_GATE_STRATEGY="merged",
+        QDRANT_COLLECTION=f"test_ask_stream_{uuid.uuid4().hex[:8]}",
+    )
 
 
 @pytest.fixture
@@ -105,6 +109,7 @@ def test_ask_stream_emits_tool_and_token_events(stream_client: TestClient):
     types = [event["type"] for event in events]
     assert "status" in types
     assert "tool_start" in types
+    assert "intent" in types
     assert "token" in types
     assert types[-1] == "done"
 
@@ -112,13 +117,16 @@ def test_ask_stream_emits_tool_and_token_events(stream_client: TestClient):
     assert done["answer"]
     assert done["title_id"] == "stream-title"
     assert done["model_tier"] in ("fast", "escalated")
+    assert done.get("intent") == "CONTENT"
 
     tokens = "".join(event.get("text", "") for event in events if event["type"] == "token")
-    assert tokens.strip() == done["answer"].strip()
+    assert tokens.strip()
+    # Final answer is source of truth (may be brevity-rewritten vs stream chips).
+    assert done["answer"].strip()
 
 
 def test_watch_page_references_stream_endpoint(stream_client: TestClient):
     response = stream_client.get("/watch")
     assert response.status_code == 200
     assert "/ask/stream" in response.text
-    assert "createSentenceSpeaker" in response.text
+    assert "speakOnce" in response.text

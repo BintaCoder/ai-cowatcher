@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 WhisperModelSize = Literal["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 WhisperComputeType = Literal["int8", "int8_float16", "float16", "float32"]
 EscalationStrategy = Literal["heuristic", "prompt"]
-UtteranceGateStrategy = Literal["heuristic", "prompt"]
+UtteranceGateStrategy = Literal["heuristic", "prompt", "merged"]
 
 
 class Settings(BaseSettings):
@@ -59,6 +59,19 @@ class Settings(BaseSettings):
     qdrant_knowledge_collection: str = Field(
         default="title_knowledge", alias="QDRANT_KNOWLEDGE_COLLECTION"
     )
+
+    # ── Q&A response cache (exact Redis + semantic Qdrant) ─────────────────────
+    qa_cache_enabled: bool = Field(default=True, alias="QA_CACHE_ENABLED")
+    qa_cache_collection: str = Field(default="qa_cache", alias="QA_CACHE_COLLECTION")
+    qa_cache_ts_bucket_sec: int = Field(default=30, alias="QA_CACHE_TS_BUCKET_SEC")
+    qa_cache_exact_ttl_sec: int = Field(default=7200, alias="QA_CACHE_EXACT_TTL_SEC")
+    qa_cache_semantic_ttl_sec: int = Field(
+        default=7200, alias="QA_CACHE_SEMANTIC_TTL_SEC"
+    )
+    qa_cache_semantic_threshold: float = Field(
+        default=0.93, alias="QA_CACHE_SEMANTIC_THRESHOLD"
+    )
+    qa_cache_semantic_top_k: int = Field(default=3, alias="QA_CACHE_SEMANTIC_TOP_K")
 
     # ── Neo4j (character intelligence graph) ──────────────────────────────────
     neo4j_uri: str = Field(default="", alias="NEO4J_URI")
@@ -170,9 +183,12 @@ class Settings(BaseSettings):
 
     # ── Utterance gate (mic / typed noise + intents) ──────────────────────────
     utterance_gate_enabled: bool = Field(default=True, alias="UTTERANCE_GATE_ENABLED")
-    # heuristic = rules only; prompt = rules + ambiguous YES/NO via fast LLM (Ollama).
+    # heuristic = rules only
+    # prompt = rules + ambiguous YES/NO via a second fast-LLM call
+    # merged = free heuristics for clear cases; ambiguous + content go through one
+    #          tagged completion (intent + answer in the same stream/call)
     utterance_gate_strategy: UtteranceGateStrategy = Field(
-        default="prompt",
+        default="merged",
         alias="UTTERANCE_GATE_STRATEGY",
     )
 

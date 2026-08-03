@@ -15,6 +15,13 @@ from ai_cowatcher.agent.completion import (
     _chunk_text_for_stream,
 )
 from ai_cowatcher.agent.grounding import grounded_fallback_answer, is_refusal_answer
+from ai_cowatcher.agent.intent_tags import (
+    IntentStreamParser,
+    MERGED_SYSTEM_PROMPT,
+    build_merged_user_turn,
+    parse_tagged_answer,
+    social_body_or_default,
+)
 from ai_cowatcher.agent.joke_intent import (
     is_joke_request,
     joke_fallback_answer,
@@ -145,6 +152,12 @@ class ConversationAgent:
             tools.append(CAST_LOOKUP_TOOL)
         return tools
 
+    def _use_merged_intent(self) -> bool:
+        return (
+            bool(getattr(self._settings, "utterance_gate_enabled", True))
+            and getattr(self._settings, "utterance_gate_strategy", "merged") == "merged"
+        )
+
     def answer(
         self,
         *,
@@ -157,6 +170,16 @@ class ConversationAgent:
         gated, gate_usage = self._gated_answer(question=question)
         if gated is not None:
             return gated
+
+        if self._use_merged_intent():
+            return self._answer_merged(
+                title_id=title_id,
+                current_ts=current_ts,
+                question=question,
+                user_id=user_id,
+                title_display_name=title_display_name,
+                gate_usage=gate_usage,
+            )
 
         tier_selection = self._tier_router.select_tier(question)
         tier_decision = tier_selection.decision
@@ -236,8 +259,20 @@ class ConversationAgent:
                 used_context=False,
                 speak=gated.speak,
                 skip_memory=gated.skip_memory,
+                intent=_intent_from_gate_reason(gated.escalation_reason),
             )
             del gate_usage
+            return
+
+        if self._use_merged_intent():
+            yield from self._answer_merged_stream(
+                title_id=title_id,
+                current_ts=current_ts,
+                question=question,
+                user_id=user_id,
+                title_display_name=title_display_name,
+                gate_usage=gate_usage,
+            )
             return
 
         yield AskStreamEvent(type="status", message="Routing question…")
@@ -288,6 +323,301 @@ class ConversationAgent:
             skip_memory=False,
         )
         del usage
+
+    def _prefetch_scene_evidence(
+        self,
+        *,
+        question: str,
+        title_id: str,
+        current_ts: float,
+    ) -> tuple[list[Any], str]:
+        """Speculative scene_lookup so the tagged completion is grounded."""
+        query = joke_scene_query(question) if is_joke_request(question) else question
+        with observe_tool_call("scene_lookup"):
+            hits = self._scene_lookup.lookup(
+                title_id=title_id,
+                query_text=query,
+                current_ts=current_ts,
+            )
+        payload = [hit.to_tool_dict() for hit in hits]
+        if not payload:
+            return [], "(no scene matches)"
+        return [payload], json.dumps(payload, ensure_ascii=False)
+
+    def _merged_messages(
+        self,
+        *,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        scene_evidence: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"role": "system", "content": MERGED_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_merged_user_turn(
+                    title_id=title_id,
+                    current_ts=current_ts,
+                    question=question,
+                    scene_evidence=scene_evidence,
+                ),
+            },
+        ]
+
+    def _resolve_merged_tag(
+        self,
+        *,
+        tag: str,
+        body: str,
+        question: str,
+        tool_payloads: list[Any],
+        used_context: bool,
+    ) -> tuple[str, bool, bool, bool, str]:
+        """Return (text, speak, skip_memory, navigate, reason)."""
+        joke_mode = tag == "JOKE" or is_joke_request(question)
+        if tag == "FILLER":
+            return "", False, True, False, "merged:FILLER"
+        if tag == "NAVIGATE":
+            return "", False, True, True, "merged:NAVIGATE"
+        if tag == "SOCIAL":
+            text = enforce_brief_answer(
+                social_body_or_default(body), question, joke_mode=False
+            )
+            return text, True, True, False, "merged:SOCIAL"
+        if tag == "JOKE":
+            text, used = self._finalize_answer(
+                raw=body or None,
+                question=question,
+                tool_payloads=tool_payloads,
+                used_context=used_context,
+                joke_mode=True,
+                force_lookup_if_empty=False,
+            )
+            return text, bool(text.strip()), False, False, "merged:JOKE"
+        # CONTENT (or unknown → already treated as CONTENT by parser)
+        if used_context and not (body or "").strip():
+            body = grounded_fallback_answer(question, tool_payloads) or _UNKNOWN_ANSWER
+        text, _used = self._finalize_answer(
+            raw=body or None,
+            question=question,
+            tool_payloads=tool_payloads,
+            used_context=used_context,
+            joke_mode=False,
+            force_lookup_if_empty=False,
+        )
+        if joke_mode and tag == "CONTENT":
+            # Rare: body tagged CONTENT but question was a joke request
+            pass
+        return text, bool(text.strip()), False, False, f"merged:{tag}"
+
+    def _answer_merged(
+        self,
+        *,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        user_id: str,
+        title_display_name: str | None,
+        gate_usage: TokenUsage,
+    ) -> AgentAnswer:
+        del user_id, title_display_name  # evidence path only for now
+        model = self._settings.conversation_fast_model
+        payloads, scene_evidence = self._prefetch_scene_evidence(
+            question=question, title_id=title_id, current_ts=current_ts
+        )
+        used_context = bool(payloads)
+        messages = self._merged_messages(
+            title_id=title_id,
+            current_ts=current_ts,
+            question=question,
+            scene_evidence=scene_evidence,
+        )
+        result = self._completion.complete(
+            model=model,
+            messages=messages,
+            tools=None,
+            temperature=self._settings.llm_temperature,
+            max_tokens=self._answer_max_tokens(),
+        )
+        usage = gate_usage.merge(result.usage or TokenUsage.empty())
+        parsed = parse_tagged_answer(result.content)
+
+        tag = parsed.tag
+        body = parsed.body
+        if tag == "CONTENT" and payloads:
+            mm = self._try_multimodal_answer(
+                question=question,
+                tool_payloads=payloads,
+                model=model,
+            )
+            if mm is not None:
+                mm_text, mm_usage = mm
+                if mm_usage is not None:
+                    usage = usage.merge(mm_usage)
+                body = mm_text
+                used_context = True
+                reason_suffix = "+multimodal"
+            else:
+                reason_suffix = ""
+        else:
+            reason_suffix = ""
+
+        text, speak, skip_memory, navigate, reason = self._resolve_merged_tag(
+            tag=tag,
+            body=body,
+            question=question,
+            tool_payloads=payloads,
+            used_context=used_context,
+        )
+        del navigate  # non-stream: client still does local navigate heuristics
+        return AgentAnswer(
+            text=text,
+            model_tier="fast",
+            model_name=model,
+            escalation_reason=reason + reason_suffix,
+            used_context=used_context,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            skip_memory=skip_memory,
+            speak=speak,
+        )
+
+    def _answer_merged_stream(
+        self,
+        *,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        user_id: str,
+        title_display_name: str | None,
+        gate_usage: TokenUsage,
+    ) -> Iterator[AskStreamEvent]:
+        del user_id, title_display_name
+        model = self._settings.conversation_fast_model
+        yield AskStreamEvent(type="status", message="Checking scenes…")
+        yield AskStreamEvent(
+            type="tool_start", tool="scene_lookup", message="Checking scenes…"
+        )
+        payloads, scene_evidence = self._prefetch_scene_evidence(
+            question=question, title_id=title_id, current_ts=current_ts
+        )
+        yield AskStreamEvent(
+            type="tool_end", tool="scene_lookup", message="scene_lookup done"
+        )
+        used_context = bool(payloads)
+        messages = self._merged_messages(
+            title_id=title_id,
+            current_ts=current_ts,
+            question=question,
+            scene_evidence=scene_evidence,
+        )
+
+        yield AskStreamEvent(type="status", message="Answering…")
+        parser = IntentStreamParser()
+        tag: str | None = None
+        body_parts: list[str] = []
+        emit_tokens = True  # set False for FILLER / NAVIGATE after tag
+
+        # Prefer multimodal full answer for content when clips are available
+        if payloads and should_use_multimodal(self._settings) and self._object_store:
+            mm = self._try_multimodal_answer(
+                question=question,
+                tool_payloads=payloads,
+                model=model,
+            )
+            if mm is not None:
+                mm_text, mm_usage = mm
+                del mm_usage, gate_usage
+                text, speak, skip_memory, navigate, reason = self._resolve_merged_tag(
+                    tag="CONTENT",
+                    body=mm_text,
+                    question=question,
+                    tool_payloads=payloads,
+                    used_context=True,
+                )
+                yield AskStreamEvent(type="intent", intent="CONTENT", message="CONTENT")
+                for piece in _chunk_text_for_stream(text):
+                    yield AskStreamEvent(type="token", text=piece)
+                yield AskStreamEvent(
+                    type="done",
+                    answer=text,
+                    model_tier="fast",
+                    model_name=model,
+                    escalation_reason=reason + "+multimodal",
+                    used_context=True,
+                    speak=speak and not navigate,
+                    skip_memory=skip_memory,
+                    intent="CONTENT",
+                    navigate=navigate,
+                )
+                return
+
+        for delta in self._completion.complete_stream(
+            model=model,
+            messages=messages,
+            temperature=self._settings.llm_temperature,
+            max_tokens=self._answer_max_tokens(),
+        ):
+            for kind, value in parser.feed(delta):
+                if kind == "tag":
+                    tag = value
+                    yield AskStreamEvent(type="intent", intent=tag, message=tag)
+                    if tag in ("FILLER", "NAVIGATE"):
+                        emit_tokens = False
+                elif kind == "text" and emit_tokens:
+                    body_parts.append(value)
+                    # Stream body only for SOCIAL / JOKE / CONTENT
+                    if tag in ("SOCIAL", "JOKE", "CONTENT") or tag is None:
+                        yield AskStreamEvent(type="token", text=value)
+
+        for kind, value in parser.finish():
+            if kind == "tag" and tag is None:
+                tag = value
+                yield AskStreamEvent(type="intent", intent=tag, message=tag)
+                if tag in ("FILLER", "NAVIGATE"):
+                    emit_tokens = False
+            elif kind == "text" and emit_tokens:
+                body_parts.append(value)
+                if tag in ("SOCIAL", "JOKE", "CONTENT"):
+                    yield AskStreamEvent(type="token", text=value)
+
+        raw_body = "".join(body_parts)
+        final_tag = tag or "CONTENT"
+        text, speak, skip_memory, navigate, reason = self._resolve_merged_tag(
+            tag=final_tag,
+            body=raw_body,
+            question=question,
+            tool_payloads=payloads,
+            used_context=used_context,
+        )
+
+        # If finalize rewrote answer (grounding), re-emit a clean last answer
+        streamed = raw_body.strip()
+        if (
+            text
+            and text.strip() != streamed
+            and final_tag in ("CONTENT", "JOKE", "SOCIAL")
+            and not navigate
+        ):
+            # Client already saw tokens; done.answer is source of truth
+            pass
+
+        del gate_usage
+        yield AskStreamEvent(
+            type="done",
+            answer=text,
+            model_tier="fast",
+            model_name=model,
+            escalation_reason=reason,
+            used_context=used_context,
+            speak=speak and not navigate,
+            skip_memory=skip_memory,
+            intent=final_tag,
+            navigate=navigate,
+        )
+
 
     def _force_fast_tier(self, _tier_decision: ModelTierDecision, *, reason: str) -> ModelTierDecision:
         return ModelTierDecision(
@@ -909,6 +1239,20 @@ class ConversationAgent:
             return [hit.to_tool_dict() for hit in hits], bool(hits)
 
         return None, False
+
+
+def _intent_from_gate_reason(reason: str) -> str | None:
+    if "ignore" in reason:
+        return "FILLER"
+    if "social" in reason:
+        return "SOCIAL"
+    if "off_topic" in reason:
+        return "SOCIAL"
+    if "navigate" in reason:
+        return "NAVIGATE"
+    if "joke" in reason:
+        return "JOKE"
+    return None
 
 
 def build_conversation_agent(

@@ -679,6 +679,11 @@
               if (answer.length > 4000) answer = answer.slice(0, 4000) + "…";
               answerText.textContent = answer;
               unlockOnce();
+            } else if (event.type === "intent" && event.intent) {
+              if (event.intent === "FILLER") startThinkingStatus("Skipping noise…");
+              else if (event.intent === "NAVIGATE") startThinkingStatus("Jump requested…");
+              else if (event.intent === "SOCIAL") startThinkingStatus("Quick chat…");
+              else if (event.intent === "JOKE") startThinkingStatus("Cooking a one-liner…");
             } else if (event.type === "done") {
               stopThinkingStatus();
               answer = event.answer != null ? event.answer : answer;
@@ -686,10 +691,13 @@
               const shouldSpeak = event.speak !== false && Boolean((answer || "").trim());
               if (!(answer || "").trim()) {
                 answerText.textContent = "—";
+                const reason = String(event.escalation_reason || event.intent || "");
                 setStatus(
-                  event.escalation_reason && String(event.escalation_reason).includes("gate:ignore")
+                  reason.includes("FILLER") || reason.includes("gate:ignore")
                     ? "Skipped unclear speech — still listening."
-                    : "No answer — still listening.",
+                    : event.navigate || reason.includes("NAVIGATE")
+                      ? "Handing off navigate…"
+                      : "No answer — still listening.",
                   "ok"
                 );
               } else {
@@ -711,6 +719,32 @@
       if (!donePayload) throw new Error("Stream ended without a response");
       unlockOnce();
       return { answer, done: donePayload };
+    }
+
+    async function runNavigate(titleId, question) {
+      const response = await fetch("/navigate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title_id: titleId,
+          current_ts: capturedTs,
+          question,
+          user_id: USER_ID,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Navigate request failed");
+      stopThinkingStatus();
+      answerText.textContent = data.answer || "—";
+      if (data.seek_to_ts != null) {
+        applySeek(data.seek_to_ts);
+        releaseControls();
+        setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
+        speakOnce(data.answer, "Listening while you watch — just talk.");
+        return;
+      }
+      releaseControls();
+      speakOnce(data.answer, "Listening while you watch — just talk.");
     }
 
     async function submitQuestion(question) {
@@ -743,34 +777,18 @@
       }
 
       try {
-        if (!navigate) {
-          await streamAsk(titleId, question);
+        if (navigate) {
+          await runNavigate(titleId, question);
           return;
         }
 
-        const response = await fetch("/navigate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title_id: titleId,
-            current_ts: capturedTs,
-            question,
-            user_id: USER_ID,
-          }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "Navigate request failed");
-        stopThinkingStatus();
-        answerText.textContent = data.answer || "—";
-        if (data.seek_to_ts != null) {
-          applySeek(data.seek_to_ts);
+        const result = await streamAsk(titleId, question);
+        // Merged-tag path may discover navigate intent server-side.
+        if (result.done && (result.done.navigate || result.done.intent === "NAVIGATE")) {
+          await runNavigate(titleId, question);
+        } else {
           releaseControls();
-          setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
-          speakOnce(data.answer, "Listening while you watch — just talk.");
-          return;
         }
-        releaseControls();
-        speakOnce(data.answer, "Listening while you watch — just talk.");
       } catch (err) {
         stopThinkingStatus();
         answerText.textContent = "—";

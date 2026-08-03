@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 
-from ai_cowatcher.agent.completion import CompletionClient, build_completion_client
+from ai_cowatcher.agent.completion import CompletionClient, _chunk_text_for_stream
+
 from ai_cowatcher.agent.conversation_agent import ConversationAgent, build_conversation_agent
+from ai_cowatcher.agent.stream_events import AskStreamEvent
 from ai_cowatcher.config import Settings, get_settings
 from ai_cowatcher.db.base import create_db_engine, init_database
 from ai_cowatcher.interfaces import TextEmbedder
@@ -24,6 +27,7 @@ from ai_cowatcher.storage.postgres_store import SceneEventRepository
 from ai_cowatcher.storage.qdrant_knowledge_store import QdrantKnowledgeStore
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 from ai_cowatcher.storage.object_store import ObjectStore, build_object_store
+from ai_cowatcher.storage.qa_cache import QACache, build_qa_cache, should_cache_answer
 from ai_cowatcher.storage.user_memory_store import UserMemoryStore, build_user_memory_store
 from sqlalchemy.orm import sessionmaker
 
@@ -57,11 +61,13 @@ class ViewingSession:
         settings: Settings,
         session_factory: sessionmaker | None = None,
         user_memory_store: UserMemoryStore | None = None,
+        qa_cache: QACache | None = None,
     ):
         self._agent = agent
         self._settings = settings
         self._session_factory = session_factory
         self._user_memory_store = user_memory_store
+        self._qa_cache = qa_cache
         self._title_display_names: dict[str, str | None] = {}
 
     def _lookup_title_display_name(self, title_id: str) -> str | None:
@@ -101,6 +107,52 @@ class ViewingSession:
             current_ts=current_ts,
         )
 
+    def _cache_lookup(
+        self, *, title_id: str, current_ts: float, question: str
+    ):
+        if self._qa_cache is None:
+            return None
+        try:
+            return self._qa_cache.lookup(title_id, current_ts, question)
+        except Exception:  # noqa: BLE001
+            logger.exception("QA cache lookup failed")
+            return None
+
+    def _cache_store(
+        self,
+        *,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        answer: str,
+        speak: bool,
+        skip_memory: bool,
+        escalation_reason: str | None,
+        navigate: bool = False,
+    ) -> None:
+        if self._qa_cache is None:
+            return
+        if not should_cache_answer(
+            answer=answer,
+            speak=speak,
+            skip_memory=skip_memory,
+            escalation_reason=escalation_reason,
+            navigate=navigate,
+        ):
+            return
+        try:
+            self._qa_cache.store(
+                title_id,
+                current_ts,
+                question,
+                answer,
+                question_embedding=getattr(
+                    self._qa_cache, "last_query_embedding", None
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("QA cache store failed")
+
     def ask(
         self,
         *,
@@ -111,6 +163,53 @@ class ViewingSession:
         persist_memory: bool = True,
     ) -> AskResult:
         started = time.perf_counter()
+        hit = self._cache_lookup(
+            title_id=title_id, current_ts=current_ts, question=question
+        )
+        if hit is not None:
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            reason = f"cache:{hit.source}"
+            record_ask_request(
+                AskRecord(
+                    title_id=title_id,
+                    user_id=user_id,
+                    current_ts=current_ts,
+                    latency_ms=round(latency_ms, 2),
+                    model_tier="cache",
+                    model_name=f"qa_cache:{hit.source}",
+                    escalation_reason=reason,
+                    used_context=True,
+                    dont_know=is_dont_know_answer(hit.answer),
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    total_tokens=None,
+                )
+            )
+            if persist_memory and hit.answer.strip():
+                self.persist_memory(
+                    user_id=user_id,
+                    title_id=title_id,
+                    question=question,
+                    answer=hit.answer,
+                    current_ts=current_ts,
+                )
+            return AskResult(
+                answer=hit.answer,
+                title_id=title_id,
+                user_id=user_id,
+                current_ts=current_ts,
+                model_tier="cache",
+                model_name=f"qa_cache:{hit.source}",
+                escalation_reason=reason,
+                used_context=True,
+                latency_ms=round(latency_ms, 2),
+                prompt_tokens=None,
+                completion_tokens=None,
+                total_tokens=None,
+                skip_memory=False,
+                speak=True,
+            )
+
         title_display_name = self._lookup_title_display_name(title_id)
         answer = self._agent.answer(
             title_id=title_id,
@@ -147,6 +246,16 @@ class ViewingSession:
                 current_ts=current_ts,
             )
 
+        self._cache_store(
+            title_id=title_id,
+            current_ts=current_ts,
+            question=question,
+            answer=answer.text,
+            speak=answer.speak,
+            skip_memory=answer.skip_memory,
+            escalation_reason=answer.escalation_reason,
+        )
+
         return AskResult(
             answer=answer.text,
             title_id=title_id,
@@ -172,11 +281,62 @@ class ViewingSession:
         question: str,
         user_id: str,
         persist_memory: bool = True,
-    ):
+    ) -> Iterator[AskStreamEvent]:
         """Yield AskStreamEvent objects; records telemetry and optional memory on done."""
-        from ai_cowatcher.agent.stream_events import AskStreamEvent
-
         started = time.perf_counter()
+
+        hit = self._cache_lookup(
+            title_id=title_id, current_ts=current_ts, question=question
+        )
+        if hit is not None:
+            yield AskStreamEvent(
+                type="status", message=f"Cache hit ({hit.source})…"
+            )
+            for piece in _chunk_text_for_stream(hit.answer):
+                yield AskStreamEvent(type="token", text=piece)
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            reason = f"cache:{hit.source}"
+            record_ask_request(
+                AskRecord(
+                    title_id=title_id,
+                    user_id=user_id,
+                    current_ts=current_ts,
+                    latency_ms=round(latency_ms, 2),
+                    model_tier="cache",
+                    model_name=f"qa_cache:{hit.source}",
+                    escalation_reason=reason,
+                    used_context=True,
+                    dont_know=is_dont_know_answer(hit.answer),
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    total_tokens=None,
+                )
+            )
+            if persist_memory and hit.answer.strip():
+                self.persist_memory(
+                    user_id=user_id,
+                    title_id=title_id,
+                    question=question,
+                    answer=hit.answer,
+                    current_ts=current_ts,
+                )
+            yield AskStreamEvent(
+                type="done",
+                answer=hit.answer,
+                title_id=title_id,
+                user_id=user_id,
+                current_ts=current_ts,
+                model_tier="cache",
+                model_name=f"qa_cache:{hit.source}",
+                escalation_reason=reason,
+                used_context=True,
+                latency_ms=round(latency_ms, 2),
+                speak=True,
+                skip_memory=False,
+                intent="CONTENT",
+            )
+            return
+
         title_display_name = self._lookup_title_display_name(title_id)
         answer_text = ""
 
@@ -205,6 +365,8 @@ class ViewingSession:
                     latency_ms=round(latency_ms, 2),
                     speak=event.speak if event.speak is not None else True,
                     skip_memory=bool(event.skip_memory),
+                    intent=event.intent,
+                    navigate=event.navigate,
                 )
                 record_ask_request(
                     AskRecord(
@@ -235,6 +397,16 @@ class ViewingSession:
                         answer=answer_text,
                         current_ts=current_ts,
                     )
+                self._cache_store(
+                    title_id=title_id,
+                    current_ts=current_ts,
+                    question=question,
+                    answer=answer_text,
+                    speak=bool(event.speak if event.speak is not None else True),
+                    skip_memory=bool(event.skip_memory),
+                    escalation_reason=event.escalation_reason,
+                    navigate=bool(event.navigate),
+                )
                 yield done_event
             else:
                 yield event
@@ -257,6 +429,7 @@ def build_viewing_session(
     knowledge_store: QdrantKnowledgeStore | None = None,
     user_memory_store: UserMemoryStore | None = None,
     object_store: ObjectStore | None = None,
+    qa_cache: QACache | None = None,
 ) -> ViewingSession:
     settings = settings or get_settings()
     logger.info(
@@ -291,9 +464,14 @@ def build_viewing_session(
         user_memory=UserMemoryTool(memory_store, settings),
         object_store=objects,
     )
+    cache = qa_cache
+    if cache is None and getattr(settings, "qa_cache_enabled", True):
+        client = getattr(qdrant, "_client", None)
+        cache = build_qa_cache(settings, embedder=embedder, qdrant_client=client)
     return ViewingSession(
         agent,
         settings,
         session_factory=session_factory,
         user_memory_store=memory_store,
+        qa_cache=cache,
     )

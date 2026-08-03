@@ -182,6 +182,13 @@ class MockCompletionClient:
         yield from _chunk_text_for_stream(content)
 
     def _decide(self, messages: list[dict[str, Any]]) -> CompletionResult:
+        if _is_merged_intent_request(messages):
+            return CompletionResult(
+                content=_mock_merged_tagged_reply(messages),
+                tool_calls=[],
+                usage=_mock_usage(messages),
+            )
+
         if messages and messages[-1].get("role") == "tool":
             question = _latest_user_message(messages)
             tool_content = messages[-1]["content"]
@@ -298,12 +305,17 @@ class MockCompletionClient:
         if not result.get("found") or not result.get("appearances"):
             return "No, this looks like the first time you're seeing them."
         count = result.get("appearance_count") or len(result.get("appearances", []))
-        parts = [f"Yes, you've seen them in {count} earlier scene(s)."]
+        # Keep one brief sentence so brevity isn't forced to drop the relationship.
+        rel_bits: list[str] = []
         for rel in result.get("relationships", []):
             summary = rel.get("summary")
             if summary:
-                parts.append(str(summary))
-        return " ".join(parts)
+                rel_bits.append(str(summary).rstrip("."))
+            elif rel.get("rel_type"):
+                rel_bits.append(f"their {rel['rel_type']} link is already on the table")
+        if rel_bits:
+            return f"Yes — you've seen them earlier, and {rel_bits[0].lower()}."
+        return f"Yes, you've seen them in {count} earlier scene(s)."
 
     def _answer_from_knowledge(self, tool_content: str) -> str:
         try:
@@ -461,6 +473,90 @@ _KNOWLEDGE_INTENT = re.compile(
 
 def _is_knowledge_question(question: str) -> bool:
     return bool(_KNOWLEDGE_INTENT.search(question))
+
+
+def _is_merged_intent_request(messages: list[dict[str, Any]]) -> bool:
+    if not messages:
+        return False
+    content = str(messages[0].get("content", ""))
+    return (
+        messages[0].get("role") == "system"
+        and "intent router and answer generator" in content
+    )
+
+
+def _mock_merged_viewer_question(messages: list[dict[str, Any]]) -> str:
+    user = _latest_user_message(messages)
+    match = re.search(r'viewer_question:\s*"([^"]*)"', user, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return user.strip()
+
+
+def _mock_merged_scene_json(messages: list[dict[str, Any]]) -> str | None:
+    user = _latest_user_message(messages)
+    # First JSON array after Tool evidence
+    match = re.search(r"Tool evidence.*?\n(\[.*)", user, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    blob = match.group(1).strip()
+    if blob.startswith("(no"):
+        return None
+    # take first line that looks like JSON or whole array
+    try:
+        # find matching array end roughly
+        json.loads(blob)
+        return blob
+    except json.JSONDecodeError:
+        # truncated dumps may still start with [{
+        start = blob.find("[")
+        end = blob.rfind("]")
+        if start >= 0 and end > start:
+            try:
+                json.loads(blob[start : end + 1])
+                return blob[start : end + 1]
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def _mock_merged_tagged_reply(messages: list[dict[str, Any]]) -> str:
+    question = _mock_merged_viewer_question(messages)
+    lower = question.lower().strip()
+
+    if not lower or lower in ("um", "uh", "hmm", "ah", "oh"):
+        return "[FILLER]"
+    if re.fullmatch(r"(hi|hello|hey|thanks|thank you|bye|cool|lol)\.?!?", lower):
+        return "[SOCIAL]\n\nRight here with you — ask about the show anytime."
+    if any(
+        token in lower
+        for token in ("go to", "jump to", "skip to", "take me to", "credits", "rewind")
+    ) or re.search(r"\d{1,2}:\d{2}", lower):
+        return "[NAVIGATE]"
+    if _is_joke_question(question):
+        tool_json = _mock_merged_scene_json(messages)
+        if tool_json:
+            try:
+                scenes = json.loads(tool_json)
+                mock = MockCompletionClient()
+                line = mock._joke_from_scenes(scenes) if scenes else "Waiting on a beat to riff on."
+            except json.JSONDecodeError:
+                line = "Waiting on a beat to riff on."
+        else:
+            line = "Waiting on a beat to riff on."
+        return f"[JOKE]\n\n{line}"
+
+    tool_json = _mock_merged_scene_json(messages)
+    if tool_json:
+        try:
+            scenes = json.loads(tool_json)
+            mock = MockCompletionClient()
+            body = mock._answer_from_tool_result(tool_json, question)
+        except json.JSONDecodeError:
+            body = "Something's happening on screen — details still fuzzy."
+    else:
+        body = "Not sure yet — nothing's made that clear so far."
+    return f"[CONTENT]\n\n{body}"
 
 
 def _is_utterance_gate_request(messages: list[dict[str, Any]]) -> bool:

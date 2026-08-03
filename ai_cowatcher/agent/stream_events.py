@@ -6,7 +6,9 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 
-AskEventType = Literal["status", "tool_start", "tool_end", "token", "done", "error"]
+AskEventType = Literal[
+    "status", "tool_start", "tool_end", "intent", "token", "done", "error"
+]
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,9 @@ class AskStreamEvent:
     detail: str | None = None
     speak: bool | None = None
     skip_memory: bool | None = None
+    # Merged gate tags: FILLER | SOCIAL | JOKE | NAVIGATE | CONTENT
+    intent: str | None = None
+    navigate: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}

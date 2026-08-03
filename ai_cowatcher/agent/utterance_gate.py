@@ -198,6 +198,14 @@ def classify_utterance(
 
     # Ambiguous: short or medium phrase without clear markers.
     strategy = getattr(settings, "utterance_gate_strategy", "heuristic")
+    if strategy == "merged":
+        # Intent + answer share one model call later; do not run a second classifier.
+        return UtteranceDecision(
+            action="content",
+            reason="gate:merged_pending",
+            reply="",
+            speak=True,
+        )
     if strategy == "prompt" and completion is not None:
         yes, reason, usage = _prompt_is_meaningful(cleaned, settings, completion)
         if yes:
