@@ -68,8 +68,9 @@ class Settings(BaseSettings):
     qa_cache_semantic_ttl_sec: int = Field(
         default=7200, alias="QA_CACHE_SEMANTIC_TTL_SEC"
     )
+    # Slightly open vs 0.93 so near-duplicate demo phrasing hits cache more often.
     qa_cache_semantic_threshold: float = Field(
-        default=0.93, alias="QA_CACHE_SEMANTIC_THRESHOLD"
+        default=0.90, alias="QA_CACHE_SEMANTIC_THRESHOLD"
     )
     qa_cache_semantic_top_k: int = Field(default=3, alias="QA_CACHE_SEMANTIC_TOP_K")
 
@@ -103,8 +104,14 @@ class Settings(BaseSettings):
         alias="MULTIMODAL_SCENE_AUDIO_ENABLED",
     )
     multimodal_max_clips: int = Field(default=2, alias="MULTIMODAL_MAX_CLIPS")
-    # Pilot: minimize tool hops / model reasoning / multimodal
+    # Pilot: minimize tool hops / model reasoning / multimodal.
+    # Production startup fails if this is false (legacy multi-tool path reachable).
     pilot_low_latency: bool = Field(default=True, alias="PILOT_LOW_LATENCY")
+    # Cap scenes + transcript size sent into the merged Gemini prompt (cost).
+    evidence_max_scenes: int = Field(default=3, alias="EVIDENCE_MAX_SCENES")
+    evidence_max_chars_per_field: int = Field(
+        default=280, alias="EVIDENCE_MAX_CHARS_PER_FIELD"
+    )
 
     # ── FFmpeg (subprocess) ───────────────────────────────────────────────────
     ffmpeg_bin: str = Field(default="ffmpeg", alias="FFMPEG_BIN")
@@ -183,6 +190,17 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.35, alias="LLM_TEMPERATURE")
     # LiteLLM/Gemini 3: lower thinking so max_tokens isn't all reasoning.
     llm_reasoning_effort: str = Field(default="minimal", alias="LLM_REASONING_EFFORT")
+    # Pilot cost instrumentation (USD per 1M tokens; not billing). Flash-lite class.
+    llm_input_usd_per_mtok: float = Field(
+        default=0.10, alias="LLM_INPUT_USD_PER_MTOK"
+    )
+    llm_output_usd_per_mtok: float = Field(
+        default=0.40, alias="LLM_OUTPUT_USD_PER_MTOK"
+    )
+    # Soft alert when a viewer's cumulative estimated spend exceeds this (USD).
+    session_cost_budget_usd: float = Field(
+        default=0.50, alias="SESSION_COST_BUDGET_USD"
+    )
     ollama_api_base: str = Field(
         default="http://localhost:11434",
         alias="OLLAMA_API_BASE",
@@ -398,9 +416,42 @@ class Settings(BaseSettings):
                 "(large models are cost-blocked until engagement is proven)."
             )
 
+    def legacy_multi_tool_path_reachable(self) -> bool:
+        """True when the multi-round tool LLM loop can run (not merged-only)."""
+        if self.pilot_low_latency:
+            return False
+        # Gate merged still avoids multi-tool for content; other strategies do not.
+        return self.utterance_gate_strategy != "merged"
+
+    def validate_pilot_latency_config(self) -> None:
+        """Prod must stay on 1-retrieve + 1-LLM merged path; dev logs when legacy is on."""
+        env = (self.app_env or "").strip().lower()
+        is_prod = env in ("production", "prod")
+        if is_prod:
+            if not self.pilot_low_latency:
+                raise ValueError(
+                    "PILOT_LOW_LATENCY must be true in production "
+                    "(legacy multi-tool agent path is not allowed)."
+                )
+            if self.utterance_gate_strategy != "merged":
+                raise ValueError(
+                    "UTTERANCE_GATE_STRATEGY must be 'merged' in production "
+                    "(legacy multi-tool / gate-LLM paths are not allowed)."
+                )
+            return
+        if not self.pilot_low_latency or self.utterance_gate_strategy != "merged":
+            logger.warning(
+                "legacy multi-tool path is reachable "
+                "(PILOT_LOW_LATENCY=%s UTTERANCE_GATE_STRATEGY=%s APP_ENV=%s)",
+                self.pilot_low_latency,
+                self.utterance_gate_strategy,
+                self.app_env,
+            )
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
     settings.validate_pilot_whisper_config()
+    settings.validate_pilot_latency_config()
     return settings

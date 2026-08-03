@@ -1,21 +1,40 @@
 # AI Co-watcher — End-to-End Architecture
 
 **Project:** ai-cowatcher (Pay-TV co-watcher pilot)  
-**Version:** 0.2.0 (aligned with codebase)  
+**Version:** 0.3.0 (aligned with pilot codebase, Aug 2026)  
 **Document date:** August 2026  
-**Purpose:** Printable reference for architecture, data flow, services, and cost model.
+**Purpose:** Printable reference for current design, data flow, latency model, and configuration.
 
 ---
 
 ## 1. Executive summary
 
-AI Co-watcher is a **spoiler-safe TV companion**. Core phases:
+AI Co-watcher is a **spoiler-safe TV companion**. The pilot prioritizes a **demo-ready watch loop**: ingest once, answer quickly about *what is on screen now*, cast, and light navigation — without multi-hop LLM tool thrash.
 
-1. **Offline ingestion (once per title)** — Detect scenes, extract full-title audio, transcribe + diarize, cluster faces, vision-caption frames, **slice & store per-scene audio clips**, embed text (`transcript + caption`), write **PostgreSQL + Qdrant**, optional **Neo4j** character graph and curated knowledge index.
-2. **Real-time Q&A (per viewer utterance)** — Browser ambient listen (or type) → optional utterance gate → **ConversationAgent** tool loop (`scene_lookup`, `character_lookup`, `cast_lookup`, `knowledge_search`, `user_memory`) with spoiler filters → **text and/or multimodal** answer using retrieved **scene WAV clips** → short reply (optional TTS).
-3. **Navigation (jump playback)** — `POST /navigate` resolves clock seeks, “Nth fight”, credits, actor appearances; full-title search **without** spoilers.
+### Core phases
 
-A **watch UI** (`GET /watch`) plays video, **listens continuously** while a title is loaded (session STT with cool-downs), keeps playback running, and streams answers over **`POST /ask/stream`** (SSE).
+1. **Offline ingestion (once per title)**  
+   Detect scenes → full-title audio → ASR (Whisper) → optional speaker diarization → faces → vision captions → **per-scene WAV clips** → BGE-M3 embed → **PostgreSQL + Qdrant** → optional Neo4j character graph + knowledge + **TMDB cast cache** on the title.
+
+2. **Real-time Q&A (per utterance)**  
+   Browser **wake-word STT** (“Hey …”) or typed question → utterance gate → **pilot path: `PILOT_LOW_LATENCY` / `merged`** (one scene retrieve + one streamed Gemini answer) → optional TTS.  
+   Full multi-tool agent remains available when pilot low-latency is off.
+
+3. **Navigation**  
+   `POST /navigate` for clock seeks, titled events, semantic seeks.
+
+4. **Watch UI**  
+   `GET /watch` — play video (Range stream), title dropdown (completed + on-disk paths only), duck program volume while talking, ambient mic with **Hey** wake word, SSE answers.
+
+### Design priorities (pilot)
+
+| Priority | Choice |
+|----------|--------|
+| Latency | **1 retrieve + 1 LLM** for content; avoid 3–4 Gemini rounds |
+| Models | Current Gemini 3.x IDs (`gemini-3.5-flash-lite` / `gemini-3.6-flash`); 2.0/2.5 **retired for new keys** |
+| Multimodal audio | **Off by default** (`MULTIMODAL_SCENE_AUDIO_ENABLED=false`) — text caption/transcript is enough for demos |
+| Diarization | **Optional**; missing `pyannote` → empty speakers, ingest continues |
+| Voice UX | **Hey** wake word so program audio is not treated as the user |
 
 ---
 
@@ -25,446 +44,524 @@ A **watch UI** (`GET /watch`) plays video, **listens continuously** while a titl
 flowchart TB
     subgraph Client["Viewer (browser)"]
         WATCH["GET /watch"]
-        VIDEO["HTML5 video"]
-        STT["Web Speech API\n(session STT + cool-down)"]
-        TTS["SpeechSynthesis\n(one-shot TTS)"]
+        VIDEO["HTML5 video\nH.264+AAC recommended"]
+        STT["Web Speech API\nHey wake word"]
+        DUCK["Volume duck /\nprogram-bleed ignore"]
+        TTS["SpeechSynthesis"]
     end
 
     subgraph API["FastAPI + Uvicorn"]
         ASK["POST /ask"]
         ASKSTREAM["POST /ask/stream SSE"]
         NAV["POST /navigate"]
-        CATALOG["POST /catalog/titles"]
-        INGESTAPI["POST /ingest"]
+        CATALOG["POST /catalog · /ingest"]
         STREAM["GET /video/{title_id}"]
-        GATE["Utterance gate"]
-        AGENT["ConversationAgent"]
-        JOKE["Joke path"]
-        MM["Multimodal answer\n(text + scene WAVs)"]
+        TITLES["GET /titles"]
+        CACHE["QA cache lookup"]
     end
 
-    subgraph Tools["Agent tools"]
-        SL["scene_lookup"]
-        CH["character_lookup"]
-        CAST["cast_lookup"]
-        KNOW["knowledge_search"]
-        MEM["user_memory"]
-        NAVR["navigate resolver"]
+    subgraph Agent["ConversationAgent"]
+        GATE["Utterance gate\nheuristic then merged LLM"]
+        MERGED["Merged path\nprefetch scenes + tagged answer"]
+        TOOLS["Full tool loop\nif PILOT_LOW_LATENCY=false"]
+        MM["Multimodal scene audio\noptional"]
     end
 
-    subgraph Offline["Ingest worker"]
-        WORKER["cowatcher-ingest-worker"]
+    subgraph Offline["Ingest"]
+        CLI["python -m …ingestion.cli\nor make ingest"]
         PIPE["IngestionPipeline"]
-        SCENE["PySceneDetect"]
-        FFMPEG["FFmpeg title + window audio"]
-        WHISPER["faster-whisper"]
-        DIAR["pyannote diarization"]
+        SD["PySceneDetect"]
+        FF["FFmpeg"]
+        WH["faster-whisper"]
+        DIAR["pyannote optional"]
         FACE["InsightFace"]
-        VISION["LiteLLM vision caption"]
-        EMBED["BGE-M3"]
-        OBJPUT["Object store put\nscene WAV"]
+        VIS["LiteLLM vision"]
+        EMB["BGE-M3"]
+        CASTI["TMDB cast → cast_cache"]
     end
 
     subgraph Data["Stores"]
         PG[("PostgreSQL")]
-        QD[("Qdrant scenes + knowledge")]
-        N4J[("Neo4j characters")]
-        REDIS[("Redis user memory cache")]
-        OBJ[("Object store\nlocal dir or MinIO")]
-        FS["Local video files"]
+        QD[("Qdrant")]
+        N4J[("Neo4j optional")]
+        REDIS[("Redis")]
+        OBJ[("Object store\n.cowatcher-objects or MinIO :19000")]
+        FS["Video on disk"]
     end
 
-    subgraph Cloud["Cloud LLMs via LiteLLM"]
-        GEMINI["Gemini Flash\nchat + multimodal audio"]
+    subgraph Cloud["LiteLLM → Gemini"]
+        GEM["Chat / stream / tools\nthought_signature pass-through"]
         VISAPI["Vision captions"]
-        TMDB["TMDB cast"]
+        TMDB["TMDB"]
     end
 
-    WATCH --> VIDEO & STT & TTS
-    WATCH --> ASKSTREAM & NAV
-    ASK --> GATE --> AGENT
-    ASKSTREAM --> GATE --> AGENT
-    AGENT --> JOKE
-    AGENT --> SL & CH & CAST & KNOW & MEM
-    AGENT --> MM
-    SL --> EMBED & QD
-    MM --> OBJ & GEMINI
-    NAV --> NAVR --> QD & PG
-    CATALOG & INGESTAPI --> WORKER
-    WORKER --> PIPE
-    PIPE --> SCENE & FFMPEG & WHISPER & DIAR & FACE & VISION & EMBED & OBJPUT
-    OBJPUT --> OBJ
-    PIPE --> PG & QD & N4J
-    VISION --> VISAPI
-    AGENT --> GEMINI
-    CAST --> TMDB
+    WATCH --> VIDEO & STT & DUCK & TTS
+    WATCH --> ASKSTREAM & NAV & TITLES
+    ASK & ASKSTREAM --> CACHE
+    CACHE -->|miss| GATE
+    GATE --> MERGED
+    GATE --> TOOLS
+    MERGED --> QD & PG
+    MERGED --> GEM
+    TOOLS --> QD & N4J & REDIS & GEM
+    TOOLS --> MM
+    MM --> OBJ & GEM
+    NAV --> QD & PG
+    CLI --> PIPE
+    PIPE --> SD & FF & WH & DIAR & FACE & VIS & EMB & CASTI
+    PIPE --> PG & QD & N4J & OBJ
     STREAM --> FS
-    MEM --> PG & REDIS
+    CASTI --> TMDB
+    VIS --> VISAPI
 ```
 
 ---
 
-## 3. Sequence diagram — offline ingestion
+## 3. Offline ingestion
 
-**Triggers:** `cowatcher-ingest` CLI, `POST /catalog/titles`, or `POST /ingest` → broker → **`cowatcher-ingest-worker`**.
+**Triggers**
 
-**Broker** (`MESSAGE_BROKER`): `memory` | `rabbitmq` | `kafka`.
+- `make ingest TITLE=… VIDEO=… [FORCE=1]`
+- `python -m ai_cowatcher.ingestion.cli --title-id … --video … [--force]`
+- `POST /catalog/titles` or `POST /ingest` → broker → `python -m ai_cowatcher.ingestion.worker_cli`
 
-**Resumability:** each scene is committed immediately; redelivery skips existing `scene_id`s.
+**Broker** (`MESSAGE_BROKER`): `memory` (pilot default) | `rabbitmq` | `kafka` (compose uses `apache/kafka` KRaft image).
+
+**Resumability:** each scene commits immediately; redelivery skips existing scene ids unless `--force`.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Operator
-    participant API as API / CLI
-    participant MQ as Broker
-    participant Worker as ingest-worker
+    participant CLI as CLI / worker
     participant Pipe as IngestionPipeline
     participant SD as PySceneDetect
     participant FF as FFmpeg
-    participant WH as Whisper + diarize
+    participant WH as Whisper
+    participant DI as Diarizer optional
     participant IF as InsightFace
-    participant LLM as LiteLLM vision
+    participant LLM as Vision LiteLLM
     participant BGE as BGE-M3
     participant OBJ as Object store
     participant PG as PostgreSQL
     participant QD as Qdrant
+    participant TMDB as TMDB
 
-    Operator->>API: catalog / ingest event
-    API->>MQ: IngestTitleEvent
-    MQ->>Worker: deliver
-    Worker->>Pipe: run(title_id, video_path)
-    Pipe->>PG: mark_processing / resume state
-    Pipe->>SD: detect_scenes
-    Pipe->>FF: extract_audio full title → 16kHz WAV
-    Pipe->>WH: transcribe + diarize map onto scenes
-
+    CLI->>Pipe: run(title_id, video_path, force?)
+    Pipe->>PG: mark_processing
+    Pipe->>SD: scene boundaries
+    Pipe->>FF: full-title 16 kHz WAV
+    Pipe->>WH: ASR → scenes
+    Pipe->>DI: speakers or NoOp if pyannote missing
     loop Each pending scene
         Pipe->>IF: face clusters
-        Pipe->>LLM: vision caption
-        Pipe->>FF: extract_audio_window(start,end) ≤ SCENE_AUDIO_MAX_SEC
+        Pipe->>LLM: caption mid-frame
+        Pipe->>FF: window extract ≤ SCENE_AUDIO_MAX_SEC
         Pipe->>OBJ: put scenes/{title}/{scene}.wav
         Pipe->>BGE: embed(transcript + caption)
-        Pipe->>QD: upsert vector + payload (incl. audio_object_key)
-        Pipe->>PG: save_scene_event (audio_object_key)
+        Pipe->>QD: upsert vector + audio_object_key payload
+        Pipe->>PG: save_scene_event
     end
-
-    Pipe->>PG: title_events navigation + character graph + knowledge
-    Pipe->>PG: mark_completed
+    Pipe->>PG: navigation title_events
+    Pipe->>PG: character graph optional
+    Pipe->>TMDB: cast once
+    Pipe->>PG: cast_cache + mark_completed
 ```
 
-**Resilience:** per-scene commit, resume without force, vision throttle/retry, scene audio optional (failure logs; text still indexed).
+### Diarization (optional)
+
+| Setting | Behavior |
+|---------|----------|
+| `DIARIZATION_ENABLED=true` | Prefer `pyannote` when `pip install '.[diarization]'` + HF token |
+| Package / model missing | **Warning + empty speaker clusters**; ingest does not fail |
+| Pilot stance | Diarization is **not** required for approval demos |
+
+### Cast
+
+- Extracted at **ingest** (TMDB live or mock in `MOCK_MODE`).  
+- Stored on `title_ingestions.cast_cache` (+ optional Redis TTL).  
+- `cast_lookup` at ask time: Redis → Postgres → TMDB fallback with write-through.
+
+### Video for `/watch`
+
+Browsers often fail on **AV1 + Opus** (silent audio or no play). Prefer **H.264 + AAC** for UI; ingest can still use the source file if FFmpeg decodes it. Store absolute `video_path` for stable streaming.
 
 ---
 
-## 4. Sequence diagram — real-time Q&A
+## 4. Real-time Q&A
+
+### 4.1 Two agent modes
+
+| Mode | When | Shape |
+|------|------|--------|
+| **Pilot / low latency** (default) | `PILOT_LOW_LATENCY=true` **or** `UTTERANCE_GATE_STRATEGY=merged` | Rules gate → **preload scenes** → **one** tagged Gemini stream: intent + short answer |
+| **Full tool loop** | Pilot low-latency off and strategy `prompt` / classic | Multi-round tools (`character_lookup`, `scene_lookup`, …) — **3–4 LLM calls**; often **10–15s+** on Gemini 3 |
+
+### 4.2 Pilot path (default) sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Viewer
     participant UI as /watch
-    participant STT as Browser STT
-    participant SSE as POST /ask/stream
-    participant Gate as Utterance gate
-    participant Agent as ConversationAgent
-    participant Tier as TierRouter
+    participant SSE as /ask/stream
+    participant Cache as QA cache
+    participant Gate as Free heuristics
     participant SL as scene_lookup
-    participant BGE as BGE-M3
     participant QD as Qdrant
-    participant OBJ as Object store
-    participant LLM as Gemini multimodal / chat
-    participant TTS as SpeechSynthesis
+    participant LLM as Gemini stream
+    participant TTS as TTS
 
-    Viewer->>UI: Play title (mic ambient)
-    UI->>STT: session listen continuous=false + cool-down
-    STT-->>UI: final utterance
-    UI->>SSE: {title_id, current_ts, question, user_id}
+    Viewer->>UI: typed or “Hey, who is on the screen?”
+    UI->>SSE: title_id, current_ts, question
 
-    SSE->>Gate: classify (filler / social / joke / navigate / content)
-    alt Ignore filler
-        Gate-->>UI: empty answer, speak=false
-    else Social / off-topic
-        Gate-->>UI: short canned reply
-    else Joke intent
-        Agent->>SL: scene_lookup (banter query)
-        Agent->>LLM: joke-mode short line
-    else Content
-        Agent->>Tier: fast model default
-        Agent->>SL: scene_lookup(query, current_ts)
-        Note over SL,QD: Filter start_ts ≤ current_ts (scene started)
-        SL->>BGE: embed query
-        SL->>QD: search
-        QD-->>Agent: scenes + audio_object_key
-        opt MULTIMODAL_SCENE_AUDIO_ENABLED
-            Agent->>OBJ: get WAV bytes top-K
-            Agent->>LLM: text evidence + input_audio clips
-        else Text-only fallback
-            Agent->>LLM: tool text → brief friend answer
+    SSE->>Cache: exact / semantic
+    alt Hit
+        Cache-->>UI: answer + done
+    else Miss
+        SSE->>Gate: filler / social / navigate short-circuit
+        alt Content
+            SSE->>SL: playhead-local OR embed search
+            Note over SL,QD: spoiler: start_ts ≤ current_ts
+            Note over SL: playhead path skips BGE for “on screen / just happened”
+            SL-->>SSE: scenes (caption + transcript)
+            SSE->>LLM: MERGED system + evidence → stream [CONTENT] + body
+            Note over LLM: max_tokens headroom + reasoning_effort; thought_signature if tools used
+            LLM-->>UI: token… done
         end
     end
-
-    SSE-->>UI: status / tool_* / token / done
-    UI->>TTS: one-shot speak if speak=true
-    Note over UI: Video keeps playing (no pause-to-ask)
+    UI->>TTS: if speak and non-empty
 ```
 
-**Spoiler safety (retrieval):**
+### 4.3 Scene retrieval
 
-- **Qdrant scenes:** only scenes with `start_ts ≤ current_ts` (includes the in-progress scene; excludes future starts).
-- **Characters (Neo4j):** appearances / relationships with timestamp ≤ `current_ts`.
-- **Navigation:** no spoiler filter (intentional forward seek).
+| Query type | Strategy |
+|------------|----------|
+| **“Who/what is on screen”, “what just happened”, “going on”** | **Playhead-local** Qdrant scroll: prefer scene containing `current_ts`, then recent past — **no embedding** |
+| Broader semantic questions | BGE-M3 embed query → ANN + spoiler filter |
+| Full tool loop only | Agent may call `character_lookup` / `cast_lookup` / etc. |
 
-Cast / public knowledge tools are not plot spoilers.
+Spoiler rule (scenes): only `start_ts ≤ current_ts`.  
+Characters (Neo4j): appearances / relationships already “known” by `current_ts`.
 
----
+### 4.4 Multimodal scene audio
 
-## 4b. Sequence diagram — navigation
-
-Watch UI detects navigate intents (clock, “Nth fight”, credits, “where does X appear”) → `POST /navigate` → `NavigationResolver` (time parse → `title_events` → full-title `scene_navigate`) → `seek_to_ts` + short answer. Client may seek absolute clock locally for instant feedback.
-
-**Warm process:** app lifespan builds **shared** embedder + Qdrant client used by both `ViewingSession` and `NavigationSession` (Phase A).
-
----
-
-## 4c. Streaming, gate, joke mode, multimodal
-
-| Path | Behavior |
+| Flag | Behavior |
 |------|----------|
-| **`POST /ask`** | Full JSON `AgentAnswer` after tool loop |
-| **`POST /ask/stream`** | SSE: `status`, `tool_start`/`tool_end`, `token`, `done`/`error`; memory deferred off critical path |
-| **Utterance gate** | Free heuristics for clear filler/social/navigate; **merged** strategy = single LLM call with first-line intent tags `[FILLER]`/`[SOCIAL]`/`[JOKE]`/`[NAVIGATE]`/`[CONTENT]` then answer in the same stream (`UTTERANCE_GATE_STRATEGY=merged`) |
-| **Joke** | Explicit phrases or `[JOKE]` tag → short scene-grounded line |
-| **Multimodal** | After scene tools return `audio_object_key`, load ≤ `MULTIMODAL_MAX_CLIPS` WAVs → LiteLLM multimodal messages (`input_audio`) |
-| **Cast** | Extracted once at **ingest** from TMDB → stored on `title_ingestions.cast_cache` + Redis hot cache; `cast_lookup` serves cache at ask-time (live TMDB only on miss) |
-| **Q&A cache** | Exact (Redis/memory) + semantic (Qdrant `qa_cache`); skips retrieval + LLM on hit within same 30s playhead bucket |
-| **Grounding fallback** | If model refuses but tools have text → grounded short rewrite |
+| `MULTIMODAL_SCENE_AUDIO_ENABLED=false` (default pilot) | Text-only compose from captions/transcripts |
+| `true` | After tools/scenes, load ≤ `MULTIMODAL_MAX_CLIPS` WAVs → Gemini `input_audio` |
+| Compose rule | Multimodal runs only if the **text answer is missing or a refusal** — avoids a second full Gemini call when caption text already works |
+
+### 4.5 Gate strategies
+
+| `UTTERANCE_GATE_STRATEGY` | Behavior |
+|---------------------------|----------|
+| `heuristic` | Rules only — free |
+| `prompt` | Rules + **extra Gemini YES/NO** on ambiguous lines (adds ~1–3s) |
+| **`merged` (default)** | Clear filler/social free; content/ambiguous → **one** merged LLM (intent tag + answer) |
+
+`PILOT_LOW_LATENCY=true` **forces** the merged-style single-answer path even if env strategy differs.
+
+### 4.6 Q&A cache
+
+Two-tier (`QA_CACHE_*`):
+
+1. **Exact** — Redis or in-memory, key = title + question + **30s playhead bucket**  
+2. **Semantic** — Qdrant collection `qa_cache`  
+
+Skips cache for filler/navigate/empty/“not sure”. Use for scripted demo lines.
+
+### 4.7 Gemini / LiteLLM constraints (2026)
+
+| Issue | Handling |
+|-------|----------|
+| `gemini-2.0-*` / many `2.5-*` **not available to new keys** | Use **3.x** IDs (`gemini-3.5-flash-lite`, `gemini-3.6-flash`, …) |
+| **Thought signatures** on Gemini 3 tool calls | Preserve `provider_specific_fields.thought_signature` when building assistant tool messages; LiteLLM ≥ 1.80 recommended |
+| **Reasoning tokens** consume `max_tokens` first | `LLM_MAX_TOKENS≥512`, `LLM_REASONING_EFFORT=minimal|low` or answers truncated/empty |
+| Every extra LLM hop | ~**3–5s** wall time on cloud Flash |
 
 ---
 
-## 4d. Character intelligence
+## 5. Watch UI UX
 
-Unchanged principle: single agent tools, not a second agent. Offline LangGraph → Neo4j with timestamped `APPEARS_IN` / `RELATIONSHIP`. Live `character_lookup` filters by `current_ts`.
+| Feature | Behavior |
+|---------|----------|
+| Titles | `GET /titles` — **completed**, non-ephemeral (`nav-*` / `demo-web*` filtered), **video file still on disk** |
+| Voice | Mic open while title selected; only phrases with **Hey** (or Hay) become questions |
+| Program bleed | Duck volume while listening/talking; program without wake word is ignored |
+| Duck checkbox | Conversation-awareness volume while speech / ask / TTS |
+| Stream | SSE: `status`, `tool_*`, `intent`, `token`, `done` / `error` |
+| Video codec | Prefer H.264+AAC for audio playback |
 
 ---
 
-## 5. Service & component inventory
+## 6. Sequence — navigation
 
-### 5.1 Application (this repo)
+```mermaid
+sequenceDiagram
+    participant UI as /watch
+    participant NAV as POST /navigate
+    participant R as NavigationResolver
+    participant PG as PostgreSQL
+    participant QD as Qdrant
+
+    UI->>NAV: question + current_ts
+    NAV->>R: resolve
+    alt Clock
+        R-->>UI: seek_to_ts
+    else title_events Nth event / credits
+        R->>PG: title_events
+        R-->>UI: seek_to_ts
+    else Semantic
+        R->>QD: full-title search (no spoiler filter)
+        R-->>UI: seek_to_ts + short line
+    end
+```
+
+Warm process: lifespan builds **shared** embedder + Qdrant used by ViewingSession and NavigationSession.
+
+---
+
+## 7. Service inventory
+
+### 7.1 Application
 
 | Component | Role |
 |-----------|------|
-| **FastAPI + Uvicorn** | `/ask`, `/ask/stream`, `/navigate`, `/catalog`, `/ingest`, `/watch`, `/titles`, `/video`, `/health`, metrics |
-| **IngestionPipeline** | Offline enrich + scene audio + dual write |
-| **ObjectStore** | Local filesystem or MinIO for scene WAVs |
-| **ConversationAgent** | Gate + tools + joke + multimodal + brevity |
-| **ViewingSession** | `/ask` orchestrator, telemetry, deferred memory |
-| **NavigationSession** | Warm navigate path |
-| **SceneLookupTool** | Spoiler-safe semantic search |
-| **Character / cast / knowledge / user_memory tools** | As configured |
-| **LiteLLM** | Vision ingest + conversation (+ multimodal) |
+| FastAPI + Uvicorn | API + `/watch` static HTML |
+| `IngestionPipeline` | Offline enrich + dual write |
+| `ObjectStore` | Local dir or MinIO |
+| `ConversationAgent` | Gate, merged or tools, grounding, brevity |
+| `ViewingSession` | Cache, ask/stream, deferred memory write |
+| `NavigationSession` | Warm navigate |
+| `SceneLookupTool` | Playhead-local + semantic spoiler-safe search |
+| Cast / character / knowledge / user_memory | Tools when full loop enabled |
+| LiteLLM | Vision + conversation (+ optional multimodal) |
 
-### 5.2 Infrastructure (Docker Compose)
+### 7.2 Compose services
 
-| Service | Role |
-|---------|------|
-| **PostgreSQL** | `title_ingestions`, `scene_events` (+ `audio_object_key`), `title_events`, chat turns |
-| **Qdrant** | Scene vectors + knowledge collection |
-| **Neo4j** | Character graph (optional if down, soft fail) |
-| **Redis** | User-memory cache + health |
-| **MinIO** | Optional when `OBJECT_STORE_BACKEND=minio`; default pilot uses **local** `.cowatcher-objects/` |
-| **Kafka / RabbitMQ** | Optional brokers (`MESSAGE_BROKER`) |
+| Service | Notes |
+|---------|--------|
+| PostgreSQL | Titles, scenes, cast_cache, turns, title_events |
+| Qdrant | Scenes + knowledge + qa_cache |
+| Redis | Memory cache, cast hot cache, QA exact |
+| Neo4j | Optional character graph |
+| MinIO | Optional; host ports often **19000/19001** when 9000 is taken |
+| Prometheus / Grafana | Pilot metrics (`make up` / `make up-core`) |
+| Kafka / Rabbit | Optional; Kafka image `apache/kafka` |
 
-### 5.3 Local ML / media
+### 7.3 Local ML / media
 
-| Tool | Purpose |
-|------|---------|
-| PySceneDetect | Scene bounds |
-| FFmpeg | Full audio + **per-scene windows** |
-| faster-whisper | Ingest ASR |
-| pyannote | Diarization |
-| InsightFace | Faces |
-| BGE-M3 | Query + scene embeddings (warmed at API startup) |
-| OpenCV | Mid-scene frame for captions |
+PySceneDetect, FFmpeg, faster-whisper, optional pyannote, InsightFace, BGE-M3 (warm at API start), OpenCV frames.
 
-### 5.4 Cloud APIs
+### 7.4 Cloud
 
-| Provider | Usage |
-|----------|--------|
-| **Google Gemini** (default hot path) | Conversation + **multimodal audio** answers (`gemini/gemini-3.6-flash`); optional vision captions |
-| **OpenAI** | Optional vision / alternate chat models via LiteLLM |
-| **TMDB** | Cast lookup |
-| **Browser STT/TTS** | Client-side listen + speak |
-
-### 5.5 Free vs paid (summary)
-
-| Category | Examples |
-|----------|----------|
-| Free / self-hosted | Postgres, Qdrant, Redis, local object store, Whisper, BGE, InsightFace, FFmpeg |
-| Paid usage | Gemini (or OpenAI) tokens for vision + chat/multimodal; optional managed infra |
+Gemini via LiteLLM; optional OpenAI vision/chat; TMDB cast.
 
 ---
 
-## 6. Data model (simplified)
+## 8. Data model (simplified)
 
 ```
 title_ingestions
-  ├── title_id, display_name, video_path
-  ├── status, scene_count, credits_start_ts
+  title_id, display_name, video_path, status, scene_count
+  cast_cache (JSON), cast_cached_at
+  credits_start_ts, …
 
 scene_events
-  ├── scene_id (= "{title_id}:{sNNNN}"), title_id
-  ├── start_ts, end_ts
-  ├── transcript, caption
-  ├── face_cluster_ids, speaker_cluster_ids
-  └── audio_object_key   ← e.g. scenes/{title}/{scene}.wav
+  scene_id = "{title_id}:{sNNNN}"
+  start_ts, end_ts, transcript, caption
+  face_cluster_ids, speaker_cluster_ids
+  audio_object_key
 
 Qdrant scene point
-  ├── vector[1024] ← BGE-M3(transcript + caption)
-  └── payload: times, transcript, caption, faces, speakers,
-                 audio_object_key
+  vector[1024] BGE-M3(transcript+caption)
+  payload: times, text, faces, speakers, audio_object_key
 
 Object store
-  └── scenes/{title_id}/{scene_id}.wav   (PCM 16 kHz mono)
+  scenes/{title_id}/{scene_id}.wav
 
-user_conversation_turns (+ Redis cache)
-  └── (user_id, title_id) memory for user_memory tool
+user_conversation_turns + Redis
+qa_cache (exact + Qdrant semantic)
 ```
 
 ---
 
-## 7. API surface
+## 9. API surface
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/watch` | Watch UI + ambient voice |
-| GET | `/titles` | Completed titles |
-| GET | `/video/{title_id}` | Range video stream |
-| POST | `/ask` | Full JSON Q&A |
-| POST | `/ask/stream` | SSE progressive Q&A |
+| GET | `/watch` | Watch + voice UI |
+| GET | `/titles` | Ready titles for dropdown |
+| GET | `/video/{title_id}` | HTTP Range stream |
+| POST | `/ask` | Full JSON answer |
+| POST | `/ask/stream` | SSE progressive answer |
 | POST | `/navigate` | Seek resolver |
-| POST | `/catalog/titles` | Register + enqueue ingest |
+| POST | `/catalog/titles` | Register + enqueue |
 | POST | `/ingest` | Enqueue ingest |
-| GET | `/health` | Dependencies + LLM flags |
-| GET | `/metrics-lite` | Pilot KPIs |
-| GET | `/metrics` | Prometheus |
+| GET | `/health` | Dependencies |
+| GET | `/metrics` · `/metrics-lite` | Ops |
 
 ---
 
-## 8. Performance architecture (latency & memory)
+## 10. Latency architecture
 
-| Technique | Why |
-|-----------|-----|
-| Warm embedder/sessions in **app lifespan** | Avoid cold BGE load per request |
-| `asyncio.to_thread` on `/ask` & `/navigate` | Keep event loop free |
-| SSE tokens + one-shot TTS | Perceived latency without progressive utterance piles |
-| **Session STT** (`continuous=false`) + **cool-down** | Avoid Chromium continuous-STT memory blowups |
-| Multimodal only **after** retrieval | Quality audio context without full-title audio |
-| Cap `SCENE_AUDIO_MAX_SEC` / `MULTIMODAL_MAX_CLIPS` | Bound cost/latency of audio upload to cloud LLM |
-| Prefer **Gemini Flash** online for chat+audio; leave Ollama for local experiments | Stability and multimodal capability |
+### Target shape (pilot content question)
+
+```
+[QA cache?] → [local rules] → [Qdrant playhead or BGE] → [1× Gemini stream] → tokens
+```
+
+Wall clock often **~2–6s** with flash-lite / network variance (not 15s multi-tool).
+
+### What used to burn 15s
+
+| Hop | Cost |
+|-----|------|
+| Prompt gate Gemini | ~1–3s |
+| Tool LLM #1 (character) | ~3–5s |
+| Tool LLM #2 (scene) | ~3–5s |
+| Final (+ multimodal) | ~3–6s |
+| **Stack** | **~12–18s** |
+
+### Controls
+
+| Technique | Env / code |
+|-----------|------------|
+| Force single-answer path | `PILOT_LOW_LATENCY=true` |
+| Merged gate | `UTTERANCE_GATE_STRATEGY=merged` |
+| Disable multi-hop by default | Pilot flag above |
+| Playhead retrieve | SceneLookup fast path for “on screen” |
+| No multimodal stack | `MULTIMODAL_SCENE_AUDIO_ENABLED=false` |
+| Token headroom | `LLM_MAX_TOKENS=512+`, `LLM_REASONING_EFFORT=minimal` |
+| Fast model | e.g. `gemini/gemini-3.5-flash-lite` |
+| Warm BGE | `make api` **without** `--reload` |
+| QA cache | `QA_CACHE_ENABLED=true` for demo repeats |
+| Offload | `asyncio.to_thread` for agent work |
 
 ---
 
-## 9. Configuration highlights
+## 11. Configuration highlights
 
-| Area | Key env vars |
-|------|----------------|
+| Area | Keys (representative) |
+|------|------------------------|
 | Mock | `MOCK_MODE` |
-| Conversation LLM | `LLM_TIER_FAST_MODEL`, `LLM_TIER_ESCALATED_MODEL` (default `gemini/gemini-3.6-flash`) |
+| Pilot latency | `PILOT_LOW_LATENCY`, `UTTERANCE_GATE_STRATEGY` |
+| LLM | `LLM_TIER_FAST_MODEL`, `LLM_MAX_TOKENS`, `LLM_TOOL_MAX_TOKENS`, `LLM_REASONING_EFFORT` |
 | Multimodal | `MULTIMODAL_SCENE_AUDIO_ENABLED`, `MULTIMODAL_MAX_CLIPS` |
 | Scene audio | `SCENE_AUDIO_ENABLED`, `SCENE_AUDIO_MAX_SEC` |
-| Object store | `OBJECT_STORE_BACKEND` (`local`\|`minio`), `OBJECT_STORE_LOCAL_DIR`, `MINIO_*` |
-| Utterance gate | `UTTERANCE_GATE_ENABLED`, `UTTERANCE_GATE_STRATEGY` (`heuristic` \| `prompt` \| **`merged`**) |
+| Objects | `OBJECT_STORE_BACKEND` (`local`\|`minio`), `MINIO_ENDPOINT` (often `localhost:19000`) |
+| Diarization | `DIARIZATION_ENABLED`, extras install |
+| Cast | `TMDB_API_KEY`, `TITLE_NAMES` |
+| Cache | `QA_CACHE_*` |
 | Embeddings | `EMBEDDING_MODEL`, `EMBEDDING_DEVICE` |
 | Broker | `MESSAGE_BROKER` |
 
-Re-ingest with force when enabling scene audio for older titles so `audio_object_key` is populated.
+Full reference: `.env.example`.
 
 ---
 
-## 10. Cost model notes (updated)
+## 12. Cost notes (pilot)
 
-**Ingest (per title, one-time):** vision captions remain the dominant cloud cost; **scene audio storage** is local (or MinIO) and cheap; duration of clips is capped.
+| Phase | Dominant cost |
+|-------|----------------|
+| Ingest | Vision captions (per scene); storage local / MinIO cheap |
+| Ask (pilot path) | **One** short Gemini completion |
+| Ask (legacy tools + multimodal) | Multiple Gemini calls + optional audio tokens |
+| Diarization / BGE / Whisper | Local electricity only |
 
-**Per session question:**
+**Hard path (production):** `PILOT_LOW_LATENCY=true` + `UTTERANCE_GATE_STRATEGY=merged`. Startup raises if either is wrong in `APP_ENV=production`. Metric `cowatcher_legacy_tool_path_total` counts any multi-tool loop use.
 
-- Text tool loop + small Gemini reply: low cents fractions at pilot scale  
-- Multimodal with 1–2 short WAVs: higher input cost / latency than text-only; gated by retrieval quality  
+**Evidence trim:** `EVIDENCE_MAX_SCENES` (default 3) and `EVIDENCE_MAX_CHARS_PER_FIELD` (default 280) cap payload into the merged prompt. Offline token delta: `PYTHONPATH=. python scripts/bench_evidence_cost.py`.
 
-Exact rates: verify current [Gemini](https://ai.google.dev/pricing) / OpenAI pricing. Local Whisper/BGE remain electricity-only.
+**QA cache:** threshold default `0.90`; hits via `cowatcher_qa_cache_hit_total{source=exact|semantic}` / `…_miss_total`. Warm demos: `cowatcher-warm-qa-cache` (or `python -m ai_cowatcher.qa.warm_cache`).
+
+**LLM cost logs:** structured `llm_call_cost` + Prometheus `cowatcher_llm_*_tokens_total` and `cowatcher_llm_estimated_cost_usd_total`. Session soft budget: `SESSION_COST_BUDGET_USD` (default $0.50).
+
+**Gemini context caching:** not implemented — see [COST_CONTEXT_CACHING.md](./COST_CONTEXT_CACHING.md).
+
+Confirm live Gemini rates on [ai.google.dev pricing](https://ai.google.dev/pricing).
 
 ---
 
-## 11. Deployment topology (pilot)
+## 13. Deployment topology (pilot)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Laptop / single host                                        │
-│  uvicorn :8000  (warm BGE)   ingest-worker                   │
-│  Postgres · Qdrant · Redis · Neo4j · optional MinIO/broker │
-│  .cowatcher-objects/ or MinIO  ← scene WAVs                  │
-│  video files on disk ─────► GET /video                       │
-│  Browser ──── SSE /ask/stream · /navigate · /watch           │
-└───────────────────────────┬──────────────────────────────────┘
-                            │ HTTPS
-              ┌─────────────▼──────────────┐
-              │ Gemini (chat + multimodal) │
-              │ Optional vision / TMDB     │
-              └────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  Laptop / single host                                         │
+│  make up-core · make api · make ingest                        │
+│  Postgres · Qdrant · Redis · Neo4j · minio? · prom/grafana    │
+│  .cowatcher-objects/  ·  title video files                      │
+│  Browser → /watch  →  SSE /ask/stream + Range /video           │
+└────────────────────────────┬──────────────────────────────────┘
+                             │
+               ┌─────────────▼──────────────┐
+               │ Google Gemini API (LiteLLM)  │
+               │ GEMINI_API_KEY               │
+               │ Optional TMDB                │
+               └──────────────────────────────┘
 ```
 
-Prefer `make api` **without** uvicorn `--reload` when BGE is warm (avoids OOM double-load).
+```bash
+make up-core          # core deps without Kafka if unused
+make install          # venv + editable package
+make ingest TITLE=… VIDEO=… FORCE=1
+make api              # single process, warm BGE
+# open http://localhost:8000/watch
+```
 
 ---
 
-## 12. Security & spoiler model
+## 14. Security & spoiler model
 
 | Concern | Mechanism |
 |---------|-----------|
-| Plot spoilers | Retrieval filters + prompt: only use tools/clips provided |
-| Multimodal cloud | Scene audio leaves the host when using Gemini — treat licensing/PII carefully |
-| Hallucination | Tools + grounded fallbacks; refuse future/unknown when empty |
-| Secrets | `.env` not committed; LiteLLM keys `GEMINI_API_KEY` / `GOOGLE_API_KEY` / optional OpenAI |
+| Plot spoilers | Retrieval cut at playhead + prompt: only tool evidence |
+| Multimodal | Clips leave host when enabled |
+| Keys | `.env` uncommitted |
+| Hallucination | Grounded fallback from tool text when model refuses |
+| Title list pollution | Filter pytest ids + missing files from `/titles` |
 
 ---
 
-## 13. Supported video formats
+## 15. Video formats
 
-| Format | Ingest | `/watch` |
-|--------|--------|----------|
-| MP4 H.264+AAC | Recommended | All browsers |
-| WebM | If FFmpeg/OpenCV decode | Chrome/Firefox |
-| MOV/MKV | If FFmpeg decodes | Browser-dependent |
+| Format | Ingest | Watch playback |
+|--------|--------|----------------|
+| MP4 **H.264 + AAC** | Best | Best (all browsers) |
+| MP4 AV1 + Opus | Often OK | **Audio often silent** |
+| WebM | If FFmpeg OK | Chrome/Firefox |
 
 ---
 
-## 14. Glossary
+## 16. Glossary
 
 | Term | Meaning |
 |------|---------|
-| **Scene** | Time range unit for index, spoilers, and audio clip |
-| **audio_object_key** | Object-store path for that scene’s WAV |
-| **current_ts** | Playback position sent with ask/navigate |
-| **Utterance gate** | Pre-agent filter for noise / intents |
-| **Multimodal answer** | LLM response from text evidence + retrieved scene audio |
-| **Warm session** | Embedder + stores built once at API lifespan |
-| **MOCK_MODE** | Local mocks; no paid LLM; multimodal skipped |
+| **Scene** | Index unit for spoilers, vectors, optional WAV |
+| **Playhead-local lookup** | Current/near scene without embeddings |
+| **Merged path** | One LLM: intent tag + answer |
+| **PILOT_LOW_LATENCY** | Force demo-friendly answer path |
+| **thought_signature** | Gemini 3 tool-call continuity field |
+| **Wake word** | “Hey” required for ambient voice asks |
+| **cast_cache** | Title-level cast JSON from ingest |
+| **QA cache** | Exact/semantic skip of full agent |
+| **Warm session** | Embedder + agent deps built at lifespan |
 
 ---
 
-## 15. Related docs
+## 17. Related docs
 
-- [OBSERVABILITY.md](./OBSERVABILITY.md) — metrics and alert thresholds  
+- [OBSERVABILITY.md](./OBSERVABILITY.md) — metrics / alerts  
 - [README.md](../README.md) — quick start  
-- `.env.example` — full env reference  
+- `.env.example` — env dictionary  
 
 ---
 
-## 16. Print notes
+## 18. Print notes
 
-- Print to PDF from GitHub/VS Code; Mermaid needs a renderer.  
-- For a one-pager use sections **1–2**, **5**, and **8**.
+- PDF-friendly; Mermaid needs a renderer (GitHub, VS Code, or mermaid-cli).  
+- One-pager: **§1**, **§2**, **§4.1–4.2**, **§10**.
 
 ---
 
-*Aligned with the ai-cowatcher pilot codebase (scene audio, multimodal ask, stream, gate, ambient listen, Gemini defaults). Pricing is indicative only.*
+*Aligned with the pilot codebase: merged/pilot-low-latency path, playhead retrieve, optional diarization, cast ingest cache, QA cache, wake-word watch UI, Gemini 3 thought signatures and model IDs, multimodal opt-in. Pricing is indicative only.*

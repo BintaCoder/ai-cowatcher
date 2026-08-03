@@ -43,6 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         qdrant = QdrantSceneStore(settings)
 
         logger.info("Warming real-time viewing + navigation sessions (shared embedder)")
+        settings.validate_pilot_latency_config()
         app.state.viewing_session = build_viewing_session(
             settings,
             session_factory=session_factory,
@@ -89,6 +90,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mock_mode": settings.mock_mode,
             "app_env": settings.app_env,
             "dependencies": dependencies,
+            "latency_path": {
+                "pilot_low_latency": settings.pilot_low_latency,
+                "utterance_gate_strategy": settings.utterance_gate_strategy,
+                "legacy_multi_tool_reachable": settings.legacy_multi_tool_path_reachable(),
+                "evidence_max_scenes": settings.evidence_max_scenes,
+                "evidence_max_chars_per_field": settings.evidence_max_chars_per_field,
+                "qa_cache_enabled": settings.qa_cache_enabled,
+                "qa_cache_semantic_threshold": settings.qa_cache_semantic_threshold,
+                "session_cost_budget_usd": settings.session_cost_budget_usd,
+            },
             "llm": {
                 "active_model": settings.active_llm_model,
                 "tier_fast_model": settings.conversation_fast_model,

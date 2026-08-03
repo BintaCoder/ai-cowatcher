@@ -84,6 +84,65 @@ INGEST_QUEUE_DEPTH = Gauge(
     labelnames=("broker",),
 )
 
+# ── Cost / QA cache ───────────────────────────────────────────────────────────
+
+QA_CACHE_LOOKUPS_TOTAL = Counter(
+    "cowatcher_qa_cache_lookups_total",
+    "QA cache lookup outcomes",
+    labelnames=("result",),  # exact_hit | semantic_hit | miss
+)
+
+QA_CACHE_HIT_TOTAL = Counter(
+    "cowatcher_qa_cache_hit_total",
+    "QA cache hits",
+    labelnames=("source",),  # exact | semantic
+)
+
+QA_CACHE_MISS_TOTAL = Counter(
+    "cowatcher_qa_cache_miss_total",
+    "QA cache full misses (exact + semantic miss)",
+)
+
+LEGACY_TOOL_PATH_TOTAL = Counter(
+    "cowatcher_legacy_tool_path_total",
+    "Full multi-tool LLM agent path invocations (expensive; should be rare in pilot)",
+)
+
+LLM_PROMPT_TOKENS_TOTAL = Counter(
+    "cowatcher_llm_prompt_tokens_total",
+    "Prompt tokens sent to the conversation LLM",
+    labelnames=("model", "path"),
+)
+
+LLM_COMPLETION_TOKENS_TOTAL = Counter(
+    "cowatcher_llm_completion_tokens_total",
+    "Completion tokens from the conversation LLM",
+    labelnames=("model", "path"),
+)
+
+LLM_ESTIMATED_COST_USD_TOTAL = Counter(
+    "cowatcher_llm_estimated_cost_usd_total",
+    "Estimated LLM cost in USD (pilot rates, not billing)",
+    labelnames=("model", "path"),
+)
+
+LLM_CALLS_TOTAL = Counter(
+    "cowatcher_llm_calls_total",
+    "Conversation LLM invocations",
+    labelnames=("model", "path"),
+)
+
+SESSION_COST_BUDGET_ALERTS_TOTAL = Counter(
+    "cowatcher_session_cost_budget_alerts_total",
+    "Times a user session exceeded the pilot cost budget",
+)
+
+PROMPT_TOKENS_PER_ASK = Histogram(
+    "cowatcher_ask_prompt_tokens",
+    "Estimated or reported prompt tokens for merged/ask path",
+    buckets=(50, 100, 200, 400, 800, 1600, 3200, 6400),
+)
+
 
 def observe_ask_record(record: AskRecord) -> None:
     ASK_REQUESTS_TOTAL.labels(status="success").inc()
@@ -95,6 +154,45 @@ def observe_ask_record(record: AskRecord) -> None:
 
 def record_ask_error() -> None:
     ASK_REQUESTS_TOTAL.labels(status="error").inc()
+
+
+def record_qa_cache_result(result: str) -> None:
+    """result: exact_hit | semantic_hit | miss"""
+    QA_CACHE_LOOKUPS_TOTAL.labels(result=result).inc()
+    if result == "exact_hit":
+        QA_CACHE_HIT_TOTAL.labels(source="exact").inc()
+    elif result == "semantic_hit":
+        QA_CACHE_HIT_TOTAL.labels(source="semantic").inc()
+    elif result == "miss":
+        QA_CACHE_MISS_TOTAL.inc()
+
+
+def record_legacy_tool_path() -> None:
+    LEGACY_TOOL_PATH_TOTAL.inc()
+
+
+def record_llm_token_usage(
+    *,
+    model: str,
+    path: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    estimated_usd: float,
+) -> None:
+    m = model or "unknown"
+    p = path or "other"
+    LLM_CALLS_TOTAL.labels(model=m, path=p).inc()
+    if prompt_tokens > 0:
+        LLM_PROMPT_TOKENS_TOTAL.labels(model=m, path=p).inc(prompt_tokens)
+        PROMPT_TOKENS_PER_ASK.observe(prompt_tokens)
+    if completion_tokens > 0:
+        LLM_COMPLETION_TOKENS_TOTAL.labels(model=m, path=p).inc(completion_tokens)
+    if estimated_usd > 0:
+        LLM_ESTIMATED_COST_USD_TOTAL.labels(model=m, path=p).inc(estimated_usd)
+
+
+def record_session_budget_alert() -> None:
+    SESSION_COST_BUDGET_ALERTS_TOTAL.inc()
 
 
 @contextmanager

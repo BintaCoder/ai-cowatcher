@@ -54,6 +54,7 @@ cowatcher-ingest = "ai_cowatcher.ingestion.cli:main"
 cowatcher-ingest-worker = "ai_cowatcher.ingestion.worker_cli:main"
 cowatcher-knowledge = "ai_cowatcher.ingestion.knowledge_cli:main"
 cowatcher-metrics-lite = "ai_cowatcher.observability.summarize_logs:main"
+cowatcher-warm-qa-cache = "ai_cowatcher.qa.warm_cache:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

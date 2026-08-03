@@ -4,16 +4,16 @@ Pay-TV co-watcher pilot — an AI companion that answers viewer questions about 
 
 ## Architecture
 
-Full diagrams and cost notes: **[docs/E2E_ARCHITECTURE.md](docs/E2E_ARCHITECTURE.md)** (updated August 2026).
+Full diagrams and latency notes: **[docs/E2E_ARCHITECTURE.md](docs/E2E_ARCHITECTURE.md)** (v0.3, August 2026).
 
 In short:
 
-- **Offline ingestion** (once per title): scenes, Whisper/diarize, faces, vision captions, **per-scene audio clips** (object store), BGE-M3 vectors → Postgres + Qdrant (+ optional Neo4j characters, knowledge).
-- **Real-time Q&A**: ambient browser listen (or type) → utterance gate → tool-calling agent (`scene_lookup` with spoiler filter, character/cast/knowledge/memory) → **text and/or multimodal** answer from retrieved scene WAVs + Gemini → short reply + optional TTS.
-- **Streaming**: `POST /ask/stream` (SSE); full JSON still on `POST /ask`.
-- **Navigation**: `POST /navigate` for clock jumps, events, and semantic seeks.
-- **Latency hygiene**: warm BGE/sessions at startup, thread offload for sync work, session STT (not continuous thrash).
-- **Observability**: structured `/ask` logs, `GET /metrics-lite`, Prometheus + Grafana.
+- **Offline ingestion** (once per title): scenes, Whisper, optional diarization, faces, captions, scene WAVs, BGE vectors → Postgres + Qdrant; cast cache (TMDB); optional Neo4j/knowledge.
+- **Real-time Q&A (pilot path)**: typed or “**Hey** …” voice → gate → **scene prefetch (playhead-local when possible) + one streamed Gemini answer** (`PILOT_LOW_LATENCY` / `merged`). Full multi-tool agent is optional and slower.
+- **Streaming**: `POST /ask/stream` (SSE); JSON on `POST /ask`.
+- **Navigation**: `POST /navigate`.
+- **Latency hygiene**: warm BGE, no multi-hop tools by default, multimodal audio **off** by default, QA cache, `make api` without `--reload`.
+- **Observability**: `/metrics-lite`, Prometheus + Grafana.
 
 ## Quick start
 

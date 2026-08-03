@@ -122,7 +122,14 @@ def _build_summary(records: list[AskRecord]) -> dict[str, object]:
 def metrics_lite_summary() -> dict[str, object]:
     with _lock:
         records = list(_records)
-    return _build_summary(records)
+    summary = _build_summary(records)
+    try:
+        from ai_cowatcher.observability.llm_cost import average_prompt_tokens
+
+        summary["average_prompt_tokens_recent"] = round(average_prompt_tokens(), 1)
+    except Exception:  # noqa: BLE001
+        summary["average_prompt_tokens_recent"] = 0.0
+    return summary
 
 
 def conversation_tier_counts() -> dict[str, int]:

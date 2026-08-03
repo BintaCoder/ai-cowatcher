@@ -293,20 +293,35 @@ class QACache:
         self.last_query_embedding = None
         hit = self._exact_lookup(title_id, current_ts, question)
         if hit and hit.answer.strip():
+            self._record_cache_metric("exact_hit")
             return hit
 
         try:
             embedding = self._embedder.embed_texts([question])[0]
         except Exception:  # noqa: BLE001
             logger.exception("QA cache embed failed")
+            self._record_cache_metric("miss")
             return None
 
         hit = self._semantic_lookup(title_id, current_ts, embedding)
         if hit:
+            self._record_cache_metric("semantic_hit")
             return hit
 
         self.last_query_embedding = embedding
+        self._record_cache_metric("miss")
         return None
+
+    @staticmethod
+    def _record_cache_metric(result: str) -> None:
+        try:
+            from ai_cowatcher.observability.prometheus_metrics import (
+                record_qa_cache_result,
+            )
+
+            record_qa_cache_result(result)
+        except Exception:  # noqa: BLE001
+            pass
 
     def store(
         self,

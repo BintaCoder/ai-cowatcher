@@ -47,7 +47,13 @@ from ai_cowatcher.agent.tools import (
     USER_MEMORY_TOOL,
 )
 from ai_cowatcher.config import Settings
-from ai_cowatcher.observability.prometheus_metrics import observe_tool_call
+from ai_cowatcher.observability.llm_cost import (
+    estimate_messages_tokens,
+    estimate_tokens_from_text,
+    record_llm_call,
+)
+from ai_cowatcher.observability.prometheus_metrics import observe_tool_call, record_legacy_tool_path
+from ai_cowatcher.retrieval.evidence import scene_evidence_json
 from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
 from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
 from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
@@ -343,10 +349,73 @@ class ConversationAgent:
                 query_text=query,
                 current_ts=current_ts,
             )
-        payload = [hit.to_tool_dict() for hit in hits]
-        if not payload:
+        raw_payload = [hit.to_tool_dict() for hit in hits]
+        if not raw_payload:
             return [], "(no scene matches)"
-        return [payload], json.dumps(payload, ensure_ascii=False)
+        max_scenes = int(getattr(self._settings, "evidence_max_scenes", 3) or 3)
+        max_chars = int(
+            getattr(self._settings, "evidence_max_chars_per_field", 280) or 280
+        )
+        scene_evidence = scene_evidence_json(
+            [raw_payload],
+            max_scenes=max_scenes,
+            max_chars_per_field=max_chars,
+        )
+        # Keep payload list limited to the same top-k for multimodal/grounds.
+        limited = raw_payload[: max(1, max_scenes)]
+        before_chars = len(json.dumps(raw_payload, ensure_ascii=False))
+        after_chars = len(scene_evidence)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "merged_evidence_trim",
+                    "scenes_raw": len(raw_payload),
+                    "scenes_sent": min(len(raw_payload), max(1, max_scenes)),
+                    "chars_before": before_chars,
+                    "chars_after": after_chars,
+                    "est_tokens_before": estimate_tokens_from_text(
+                        json.dumps(raw_payload, ensure_ascii=False)
+                    ),
+                    "est_tokens_after": estimate_tokens_from_text(scene_evidence),
+                },
+                separators=(",", ":"),
+            )
+        )
+        return [limited], scene_evidence
+
+    def _record_llm_cost(
+        self,
+        *,
+        model: str,
+        path: str,
+        usage: TokenUsage | None,
+        user_id: str | None = None,
+        prompt_override: int | None = None,
+        completion_override: int | None = None,
+    ) -> None:
+        prompt = prompt_override
+        completion = completion_override
+        if usage is not None:
+            if prompt is None:
+                prompt = usage.prompt_tokens
+            if completion is None:
+                completion = usage.completion_tokens
+        record_llm_call(
+            model_id=model,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            path=path,
+            user_id=user_id,
+            input_usd_per_mtok=float(
+                getattr(self._settings, "llm_input_usd_per_mtok", 0.10) or 0.10
+            ),
+            output_usd_per_mtok=float(
+                getattr(self._settings, "llm_output_usd_per_mtok", 0.40) or 0.40
+            ),
+            session_budget_usd=float(
+                getattr(self._settings, "session_cost_budget_usd", 0.50) or 0.50
+            ),
+        )
 
     def _merged_messages(
         self,
@@ -425,7 +494,7 @@ class ConversationAgent:
         title_display_name: str | None,
         gate_usage: TokenUsage,
     ) -> AgentAnswer:
-        del user_id, title_display_name  # evidence path only for now
+        del title_display_name  # evidence path only for now
         model = self._settings.conversation_fast_model
         payloads, scene_evidence = self._prefetch_scene_evidence(
             question=question, title_id=title_id, current_ts=current_ts
@@ -445,6 +514,16 @@ class ConversationAgent:
             max_tokens=self._answer_max_tokens(),
         )
         usage = gate_usage.merge(result.usage or TokenUsage.empty())
+        prompt_override = None
+        if result.usage is None or result.usage.prompt_tokens is None:
+            prompt_override = estimate_messages_tokens(messages)
+        self._record_llm_cost(
+            model=model,
+            path="merged",
+            usage=result.usage,
+            user_id=user_id,
+            prompt_override=prompt_override,
+        )
         parsed = parse_tagged_answer(result.content)
 
         tag = parsed.tag
@@ -503,7 +582,7 @@ class ConversationAgent:
         title_display_name: str | None,
         gate_usage: TokenUsage,
     ) -> Iterator[AskStreamEvent]:
-        del user_id, title_display_name
+        del title_display_name
         model = self._settings.conversation_fast_model
         yield AskStreamEvent(type="status", message="Checking scenes…")
         yield AskStreamEvent(
@@ -545,6 +624,9 @@ class ConversationAgent:
             )
             if mm is not None:
                 mm_text, mm_usage = mm
+                self._record_llm_cost(
+                    model=model, path="merged_multimodal", usage=mm_usage, user_id=user_id
+                )
                 del mm_usage, gate_usage
                 text, speak, skip_memory, navigate, reason = self._resolve_merged_tag(
                     tag="CONTENT",
@@ -570,12 +652,14 @@ class ConversationAgent:
                 )
                 return
 
+        raw_stream = []
         for delta in self._completion.complete_stream(
             model=model,
             messages=messages,
             temperature=self._settings.llm_temperature,
             max_tokens=self._answer_max_tokens(),
         ):
+            raw_stream.append(delta)
             for kind, value in parser.feed(delta):
                 if kind == "tag":
                     tag = value
@@ -600,6 +684,16 @@ class ConversationAgent:
                     yield AskStreamEvent(type="token", text=value)
 
         raw_body = "".join(body_parts)
+        prompt_tokens = estimate_messages_tokens(messages)
+        completion_tokens = estimate_tokens_from_text("".join(raw_stream))
+        self._record_llm_cost(
+            model=model,
+            path="merged_stream",
+            usage=None,
+            user_id=user_id,
+            prompt_override=prompt_tokens,
+            completion_override=completion_tokens,
+        )
         final_tag = tag or "CONTENT"
         text, speak, skip_memory, navigate, reason = self._resolve_merged_tag(
             tag=final_tag,
@@ -946,6 +1040,7 @@ class ConversationAgent:
         search_title: str | None = None,
     ) -> Iterator[AskStreamEvent]:
         """Yield stream events; return value is (text, usage, used_context)."""
+        record_legacy_tool_path()
         messages = self._initial_messages(question, confident_title, search_title)
         usage = TokenUsage.empty()
         used_context = False
@@ -961,6 +1056,12 @@ class ConversationAgent:
                 max_tokens=self._tool_max_tokens(),
             )
             usage = usage.merge(result.usage)
+            self._record_llm_cost(
+                model=tier_decision.model,
+                path="legacy",
+                usage=result.usage,
+                user_id=user_id,
+            )
 
             if not result.tool_calls:
                 answer_text, used_context, mm_usage = self._compose_final_answer(
@@ -1055,6 +1156,7 @@ class ConversationAgent:
         confident_title: str | None = None,
         search_title: str | None = None,
     ) -> tuple[str, TokenUsage | None, bool]:
+        record_legacy_tool_path()
         messages = self._initial_messages(question, confident_title, search_title)
         usage = TokenUsage.empty()
         used_context = False
@@ -1070,6 +1172,12 @@ class ConversationAgent:
                 max_tokens=self._tool_max_tokens(),
             )
             usage = usage.merge(result.usage)
+            self._record_llm_cost(
+                model=tier_decision.model,
+                path="legacy",
+                usage=result.usage,
+                user_id=user_id,
+            )
 
             if not result.tool_calls:
                 text, used_context, mm_usage = self._compose_final_answer(
