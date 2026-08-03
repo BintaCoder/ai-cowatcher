@@ -46,6 +46,8 @@ class AskResponse(BaseModel):
     model_tier: str
     model_name: str
     escalation_reason: str
+    speak: bool = True
+    skip_memory: bool = False
 
 
 class NavigateRequest(BaseModel):

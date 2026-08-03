@@ -209,6 +209,15 @@ class MockCompletionClient:
                 usage=_mock_usage(messages),
             )
 
+        if _is_utterance_gate_request(messages):
+            question = _latest_user_message(messages)
+            meaningful = _mock_utterance_gate_yes(question)
+            return CompletionResult(
+                content="YES" if meaningful else "NO",
+                tool_calls=[],
+                usage=TokenUsage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+            )
+
         if _is_classifier_request(messages):
             question = _latest_user_message(messages)
             escalate = _mock_prompt_classifier_escalates(question)
@@ -454,10 +463,42 @@ def _is_knowledge_question(question: str) -> bool:
     return bool(_KNOWLEDGE_INTENT.search(question))
 
 
+def _is_utterance_gate_request(messages: list[dict[str, Any]]) -> bool:
+    if not messages:
+        return False
+    content = str(messages[0].get("content", ""))
+    return messages[0].get("role") == "system" and "meaningful co-watch request" in content
+
+
+def _mock_utterance_gate_yes(question: str) -> bool:
+    lower = question.lower()
+    if any(
+        token in lower
+        for token in (
+            "what",
+            "who",
+            "why",
+            "how",
+            "happen",
+            "joke",
+            "going on",
+            "talking",
+            "scene",
+            "character",
+            "killer",
+            "said",
+        )
+    ):
+        return True
+    if len(lower.strip()) >= 12 and "?" in question:
+        return True
+    return False
+
+
 def _is_classifier_request(messages: list[dict[str, Any]]) -> bool:
     return bool(messages) and messages[0].get("role") == "system" and "Reply with only YES or NO" in str(
         messages[0].get("content", "")
-    )
+    ) and "meaningful co-watch" not in str(messages[0].get("content", ""))
 
 
 def _mock_prompt_classifier_escalates(question: str) -> bool:

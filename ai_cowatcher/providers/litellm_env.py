@@ -17,6 +17,10 @@ def configure_litellm_env(settings: Settings) -> None:
         os.environ["GOOGLE_API_KEY"] = settings.google_api_key
     elif settings.gemini_api_key:
         os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
+    # Local Ollama (LiteLLM reads OLLAMA_API_BASE).
+    base = (settings.ollama_api_base or "").strip()
+    if base:
+        os.environ["OLLAMA_API_BASE"] = base
 
 
 def _set_env_if_missing(name: str, value: str) -> None:

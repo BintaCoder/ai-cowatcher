@@ -131,6 +131,7 @@ class SceneEventRepository:
             caption=event.caption,
             face_cluster_ids=event.face_cluster_ids,
             speaker_cluster_ids=event.speaker_cluster_ids,
+            audio_object_key=event.audio_object_key,
         )
         self._session.merge(row)
 
@@ -177,6 +178,7 @@ class SceneEventRepository:
                     caption=row.caption,
                     face_cluster_ids=list(row.face_cluster_ids or []),
                     speaker_cluster_ids=list(row.speaker_cluster_ids or []),
+                    audio_object_key=getattr(row, "audio_object_key", None),
                 )
             )
         return records

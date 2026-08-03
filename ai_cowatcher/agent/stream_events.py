@@ -25,6 +25,8 @@ class AskStreamEvent:
     used_context: bool | None = None
     latency_ms: float | None = None
     detail: str | None = None
+    speak: bool | None = None
+    skip_memory: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}

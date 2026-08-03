@@ -50,14 +50,15 @@ async def ask_question(
         record_ask_error()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    background_tasks.add_task(
-        session.persist_memory,
-        user_id=request.user_id,
-        title_id=request.title_id,
-        question=request.question,
-        answer=result.answer,
-        current_ts=request.current_ts,
-    )
+    if not result.skip_memory and result.answer.strip():
+        background_tasks.add_task(
+            session.persist_memory,
+            user_id=request.user_id,
+            title_id=request.title_id,
+            question=request.question,
+            answer=result.answer,
+            current_ts=request.current_ts,
+        )
 
     return AskResponse(
         answer=result.answer,
@@ -67,6 +68,8 @@ async def ask_question(
         model_tier=result.model_tier,
         model_name=result.model_name,
         escalation_reason=result.escalation_reason,
+        speak=result.speak,
+        skip_memory=result.skip_memory,
     )
 
 
@@ -114,15 +117,18 @@ async def ask_question_stream(
                     )
                     break
                 if item.type == "done" and item.answer:
-                    background_tasks.add_task(
-                        session.persist_memory,
-                        user_id=request.user_id,
-                        title_id=request.title_id,
-                        question=request.question,
-                        answer=item.answer,
-                        current_ts=request.current_ts,
-                    )
-                yield _sse_line(item.to_dict())
+                    if not item.skip_memory:
+                        background_tasks.add_task(
+                            session.persist_memory,
+                            user_id=request.user_id,
+                            title_id=request.title_id,
+                            question=request.question,
+                            answer=item.answer,
+                            current_ts=request.current_ts,
+                        )
+                    yield _sse_line(item.to_dict())
+                else:
+                    yield _sse_line(item.to_dict())
         finally:
             await future
 

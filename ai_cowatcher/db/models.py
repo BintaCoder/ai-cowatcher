@@ -78,6 +78,7 @@ class SceneEvent(Base):
     speaker_cluster_ids: Mapped[list] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"), default=list
     )
+    audio_object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

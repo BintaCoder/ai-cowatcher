@@ -49,6 +49,7 @@ class PySceneDetectDetector:
 class FFmpegAudioExtractor:
     def __init__(self, settings: Settings):
         self._ffmpeg = settings.ffmpeg_bin
+        self._max_window_sec = max(1.0, float(settings.scene_audio_max_sec))
 
     def extract_audio(self, video_path: str, output_path: str) -> str:
         cmd = [
@@ -56,6 +57,39 @@ class FFmpegAudioExtractor:
             "-y",
             "-i",
             video_path,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            output_path,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return output_path
+
+    def extract_audio_window(
+        self,
+        source_path: str,
+        output_path: str,
+        *,
+        start_ts: float,
+        end_ts: float,
+    ) -> str:
+        start = max(0.0, float(start_ts))
+        duration = max(0.05, float(end_ts) - start)
+        if duration > self._max_window_sec:
+            duration = self._max_window_sec
+        cmd = [
+            self._ffmpeg,
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            source_path,
             "-vn",
             "-acodec",
             "pcm_s16le",

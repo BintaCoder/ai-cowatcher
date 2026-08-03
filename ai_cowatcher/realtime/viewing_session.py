@@ -23,6 +23,7 @@ from ai_cowatcher.storage.character_store import CharacterStore, build_character
 from ai_cowatcher.storage.postgres_store import SceneEventRepository
 from ai_cowatcher.storage.qdrant_knowledge_store import QdrantKnowledgeStore
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
+from ai_cowatcher.storage.object_store import ObjectStore, build_object_store
 from ai_cowatcher.storage.user_memory_store import UserMemoryStore, build_user_memory_store
 from sqlalchemy.orm import sessionmaker
 
@@ -43,6 +44,8 @@ class AskResult:
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    skip_memory: bool = False
+    speak: bool = True
 
 
 class ViewingSession:
@@ -135,7 +138,7 @@ class ViewingSession:
             )
         )
 
-        if persist_memory:
+        if persist_memory and not answer.skip_memory and answer.text.strip():
             self.persist_memory(
                 user_id=user_id,
                 title_id=title_id,
@@ -157,6 +160,8 @@ class ViewingSession:
             prompt_tokens=answer.prompt_tokens,
             completion_tokens=answer.completion_tokens,
             total_tokens=answer.total_tokens,
+            skip_memory=answer.skip_memory,
+            speak=answer.speak,
         )
 
     def ask_stream(
@@ -198,6 +203,8 @@ class ViewingSession:
                     escalation_reason=event.escalation_reason,
                     used_context=event.used_context,
                     latency_ms=round(latency_ms, 2),
+                    speak=event.speak if event.speak is not None else True,
+                    skip_memory=bool(event.skip_memory),
                 )
                 record_ask_request(
                     AskRecord(
@@ -215,7 +222,12 @@ class ViewingSession:
                         total_tokens=None,
                     )
                 )
-                if persist_memory:
+                should_persist = (
+                    persist_memory
+                    and not event.skip_memory
+                    and bool(answer_text.strip())
+                )
+                if should_persist:
                     self.persist_memory(
                         user_id=user_id,
                         title_id=title_id,
@@ -244,6 +256,7 @@ def build_viewing_session(
     character_store: CharacterStore | None = None,
     knowledge_store: QdrantKnowledgeStore | None = None,
     user_memory_store: UserMemoryStore | None = None,
+    object_store: ObjectStore | None = None,
 ) -> ViewingSession:
     settings = settings or get_settings()
     logger.info(
@@ -267,6 +280,7 @@ def build_viewing_session(
         init_database(engine=engine, settings=settings)
         session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     memory_store = user_memory_store or build_user_memory_store(settings, session_factory)
+    objects = object_store or build_object_store(settings)
     agent = build_conversation_agent(
         settings,
         scene_lookup,
@@ -275,6 +289,7 @@ def build_viewing_session(
         character_lookup=character_lookup,
         knowledge_search=knowledge_search,
         user_memory=UserMemoryTool(memory_store, settings),
+        object_store=objects,
     )
     return ViewingSession(
         agent,

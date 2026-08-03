@@ -30,6 +30,8 @@ class SceneEventRecord:
     caption: str
     face_cluster_ids: list[str] = field(default_factory=list)
     speaker_cluster_ids: list[str] = field(default_factory=list)
+    # Object-store key for the scene audio clip (WAV), e.g. scenes/{title}/{scene}.wav
+    audio_object_key: str | None = None
 
     @property
     def embedding_text(self) -> str:
@@ -58,9 +60,10 @@ class SceneLookupHit:
     face_cluster_ids: tuple[str, ...] = ()
     speaker_cluster_ids: tuple[str, ...] = ()
     score: float = 0.0
+    audio_object_key: str | None = None
 
     def to_tool_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "scene_id": self.scene_id,
             "title_id": self.title_id,
             "start_ts": self.start_ts,
@@ -71,6 +74,12 @@ class SceneLookupHit:
             "speaker_cluster_ids": list(self.speaker_cluster_ids),
             "score": self.score,
         }
+        if self.audio_object_key:
+            payload["audio_object_key"] = self.audio_object_key
+            payload["has_audio"] = True
+        else:
+            payload["has_audio"] = False
+        return payload
 
 
 @dataclass(frozen=True)

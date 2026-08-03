@@ -58,6 +58,7 @@ class QdrantSceneStore:
                         "caption": event.caption,
                         "face_cluster_ids": event.face_cluster_ids,
                         "speaker_cluster_ids": event.speaker_cluster_ids,
+                        "audio_object_key": event.audio_object_key,
                     },
                 )
             )
@@ -151,6 +152,11 @@ class QdrantSceneStore:
                 face_cluster_ids=tuple(point.payload.get("face_cluster_ids") or ()),
                 speaker_cluster_ids=tuple(point.payload.get("speaker_cluster_ids") or ()),
                 score=float(point.score or 0.0),
+                audio_object_key=(
+                    str(point.payload["audio_object_key"])
+                    if point.payload.get("audio_object_key")
+                    else None
+                ),
             )
             for point in results
             if point.payload is not None

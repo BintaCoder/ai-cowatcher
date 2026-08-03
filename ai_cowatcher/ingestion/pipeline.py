@@ -20,6 +20,11 @@ from ai_cowatcher.ingestion.transcription import transcripts_for_scenes
 from ai_cowatcher.providers.factory import IngestionProviders, build_ingestion_providers
 from ai_cowatcher.providers.litellm_env import configure_litellm_env
 from ai_cowatcher.retrieval.cast_lookup import CastLookupTool
+from ai_cowatcher.storage.object_store import (
+    ObjectStore,
+    build_object_store,
+    scene_audio_object_key,
+)
 from ai_cowatcher.storage.postgres_store import SceneEventRepository
 from ai_cowatcher.storage.qdrant_knowledge_store import QdrantKnowledgeStore
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
@@ -43,6 +48,7 @@ class IngestionPipeline:
         providers: IngestionProviders | None = None,
         session_factory: sessionmaker | None = None,
         qdrant_store: QdrantSceneStore | None = None,
+        object_store: ObjectStore | None = None,
     ):
         self._settings = settings or get_settings()
         self._providers = providers or build_ingestion_providers(self._settings)
@@ -52,6 +58,7 @@ class IngestionPipeline:
             session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
         self._session_factory = session_factory
         self._qdrant = qdrant_store or QdrantSceneStore(self._settings)
+        self._object_store = object_store or build_object_store(self._settings)
 
     def run(
         self,
@@ -79,6 +86,10 @@ class IngestionPipeline:
             if force:
                 repo.delete_title_data(title_id)
                 self._qdrant.delete_title(title_id)
+                try:
+                    self._object_store.delete_prefix(f"scenes/{title_id}/")
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to delete scene audio for title %s", title_id)
 
             existing_scene_ids = repo.get_existing_scene_ids(title_id)
             resuming = bool(existing_scene_ids)
@@ -148,37 +159,81 @@ class IngestionPipeline:
                 speaker_segments, pending, title_id
             )
 
-        self._qdrant.ensure_collection(self._providers.embedder.vector_size)
+            self._qdrant.ensure_collection(self._providers.embedder.vector_size)
 
-        delay = self._settings.vision_caption_delay_sec
-        processed = 0
-        for scene, transcript, speakers in zip(
-            pending, transcripts, speaker_clusters, strict=True
-        ):
-            clusters = self._providers.face_analyzer.detect_face_clusters(
-                video_path, title_id, scene
+            delay = self._settings.vision_caption_delay_sec
+            processed = 0
+            for scene, transcript, speakers in zip(
+                pending, transcripts, speaker_clusters, strict=True
+            ):
+                clusters = self._providers.face_analyzer.detect_face_clusters(
+                    video_path, title_id, scene
+                )
+                caption = self._providers.captioner.caption_scenes(video_path, [scene])[0]
+                audio_key = self._store_scene_audio(
+                    title_id=title_id,
+                    scene=scene,
+                    title_audio_path=audio_path,
+                    tmpdir=tmpdir,
+                )
+                event = _build_scene_event(
+                    title_id,
+                    scene,
+                    transcript,
+                    caption,
+                    clusters,
+                    speakers,
+                    audio_object_key=audio_key,
+                )
+
+                vector = self._providers.embedder.embed_texts([event.embedding_text])[0]
+                self._qdrant.upsert_scene_events([event], [vector])
+                repo.save_scene_event(event)
+
+                processed += 1
+                logger.info(
+                    "Persisted scene %s (%d/%d) for title %s audio=%s",
+                    scene.scene_id,
+                    processed,
+                    len(pending),
+                    title_id,
+                    audio_key or "none",
+                )
+                if processed < len(pending) and delay > 0:
+                    time.sleep(delay)
+
+            return processed
+
+    def _store_scene_audio(
+        self,
+        *,
+        title_id: str,
+        scene: SceneBoundary,
+        title_audio_path: str,
+        tmpdir: str,
+    ) -> str | None:
+        if not self._settings.scene_audio_enabled:
+            return None
+        try:
+            clip_path = str(Path(tmpdir) / f"{scene.scene_id}.wav")
+            self._providers.audio_extractor.extract_audio_window(
+                title_audio_path,
+                clip_path,
+                start_ts=scene.start_ts,
+                end_ts=scene.end_ts,
             )
-            caption = self._providers.captioner.caption_scenes(video_path, [scene])[0]
-            event = _build_scene_event(
-                title_id, scene, transcript, caption, clusters, speakers
-            )
-
-            vector = self._providers.embedder.embed_texts([event.embedding_text])[0]
-            self._qdrant.upsert_scene_events([event], [vector])
-            repo.save_scene_event(event)
-
-            processed += 1
-            logger.info(
-                "Persisted scene %s (%d/%d) for title %s",
-                scene.scene_id,
-                processed,
-                len(pending),
+            data = Path(clip_path).read_bytes()
+            if not data:
+                return None
+            key = scene_audio_object_key(title_id, scene.scene_id)
+            return self._object_store.put_bytes(key, data, content_type="audio/wav")
+        except Exception:  # noqa: BLE001 — audio optional; text still usable
+            logger.exception(
+                "Scene audio extract/upload failed title=%s scene=%s",
                 title_id,
+                scene.scene_id,
             )
-            if processed < len(pending) and delay > 0:
-                time.sleep(delay)
-
-        return processed
+            return None
 
     def _index_navigation_events(self, title_id: str, repo: SceneEventRepository) -> None:
         scenes = repo.list_scene_records(title_id)
@@ -275,6 +330,7 @@ def _build_scene_event(
     caption: str,
     face_cluster_ids: list[str],
     speaker_cluster_ids: list[str],
+    audio_object_key: str | None = None,
 ) -> SceneEventRecord:
     return SceneEventRecord(
         scene_id=scene.scene_id,
@@ -285,6 +341,7 @@ def _build_scene_event(
         caption=caption,
         face_cluster_ids=face_cluster_ids,
         speaker_cluster_ids=speaker_cluster_ids,
+        audio_object_key=audio_object_key,
     )
 
 

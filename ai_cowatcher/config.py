@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 WhisperModelSize = Literal["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 WhisperComputeType = Literal["int8", "int8_float16", "float16", "float32"]
 EscalationStrategy = Literal["heuristic", "prompt"]
+UtteranceGateStrategy = Literal["heuristic", "prompt"]
 
 
 class Settings(BaseSettings):
@@ -71,6 +72,24 @@ class Settings(BaseSettings):
     minio_secret_key: str = Field(default="minioadmin", alias="MINIO_SECRET_KEY")
     minio_bucket: str = Field(default="cowatcher", alias="MINIO_BUCKET")
     minio_secure: bool = Field(default=False, alias="MINIO_SECURE")
+    # local | minio — local uses OBJECT_STORE_LOCAL_DIR (default under project)
+    object_store_backend: Literal["local", "minio"] = Field(
+        default="local",
+        alias="OBJECT_STORE_BACKEND",
+    )
+    object_store_local_dir: str = Field(
+        default=".cowatcher-objects",
+        alias="OBJECT_STORE_LOCAL_DIR",
+    )
+    # Max seconds of scene audio stored / sent to multimodal LLM
+    scene_audio_max_sec: float = Field(default=20.0, alias="SCENE_AUDIO_MAX_SEC")
+    scene_audio_enabled: bool = Field(default=True, alias="SCENE_AUDIO_ENABLED")
+    # Attach retrieved clips to the conversation answer model
+    multimodal_scene_audio_enabled: bool = Field(
+        default=True,
+        alias="MULTIMODAL_SCENE_AUDIO_ENABLED",
+    )
+    multimodal_max_clips: int = Field(default=2, alias="MULTIMODAL_MAX_CLIPS")
 
     # ── FFmpeg (subprocess) ───────────────────────────────────────────────────
     ffmpeg_bin: str = Field(default="ffmpeg", alias="FFMPEG_BIN")
@@ -107,15 +126,20 @@ class Settings(BaseSettings):
     vision_frame_max_size: int = Field(default=512, alias="VISION_FRAME_MAX_SIZE")
 
     # ── Conversation LLM (LiteLLM) ────────────────────────────────────────────
-    llm_primary_model: str = Field(default="openai/gpt-4o-mini", alias="LLM_PRIMARY_MODEL")
+    llm_primary_model: str = Field(default="gemini/gemini-2.0-flash", alias="LLM_PRIMARY_MODEL")
     llm_fallback_model: str = Field(
-        default="anthropic/claude-3-5-haiku-latest",
+        default="gemini/gemini-2.0-flash",
         alias="LLM_FALLBACK_MODEL",
     )
     llm_mock_model: str = Field(default="mock-llm", alias="LLM_MOCK_MODEL")
-    llm_tier_fast_model: str = Field(default="openai/gpt-4o-mini", alias="LLM_TIER_FAST_MODEL")
+    # Prefer online multimodal-capable models for co-watch answers (audio+text).
+    # Override to ollama/* only if you accept text-only fall back when clips need mm.
+    llm_tier_fast_model: str = Field(
+        default="gemini/gemini-2.0-flash",
+        alias="LLM_TIER_FAST_MODEL",
+    )
     llm_tier_escalated_model: str = Field(
-        default="openai/gpt-4o",
+        default="gemini/gemini-2.0-flash",
         alias="LLM_TIER_ESCALATED_MODEL",
     )
     llm_mock_tier_fast_model: str = Field(
@@ -139,6 +163,18 @@ class Settings(BaseSettings):
     # Tool-call JSON needs more headroom than spoken answer size.
     llm_tool_max_tokens: int = Field(default=384, alias="LLM_TOOL_MAX_TOKENS")
     llm_temperature: float = Field(default=0.35, alias="LLM_TEMPERATURE")
+    ollama_api_base: str = Field(
+        default="http://localhost:11434",
+        alias="OLLAMA_API_BASE",
+    )
+
+    # ── Utterance gate (mic / typed noise + intents) ──────────────────────────
+    utterance_gate_enabled: bool = Field(default=True, alias="UTTERANCE_GATE_ENABLED")
+    # heuristic = rules only; prompt = rules + ambiguous YES/NO via fast LLM (Ollama).
+    utterance_gate_strategy: UtteranceGateStrategy = Field(
+        default="prompt",
+        alias="UTTERANCE_GATE_STRATEGY",
+    )
 
     # ── Real-time retrieval ─────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")

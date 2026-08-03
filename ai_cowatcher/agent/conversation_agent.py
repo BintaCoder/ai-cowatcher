@@ -21,6 +21,12 @@ from ai_cowatcher.agent.joke_intent import (
     joke_scene_query,
     soft_no_scene_joke,
 )
+from ai_cowatcher.agent.multimodal import (
+    build_multimodal_messages,
+    collect_audio_keys,
+    load_scene_clips,
+    should_use_multimodal,
+)
 from ai_cowatcher.agent.prompts import CONVERSATION_SYSTEM_PROMPT, JOKE_MODE_SYSTEM_PROMPT
 from ai_cowatcher.agent.stream_events import AskStreamEvent
 from ai_cowatcher.agent.tier_routing import ModelTierDecision, TierRouter, build_tier_router
@@ -39,6 +45,7 @@ from ai_cowatcher.retrieval.character_lookup import CharacterLookupTool
 from ai_cowatcher.retrieval.knowledge_search import KnowledgeSearchTool
 from ai_cowatcher.retrieval.scene_lookup import SceneLookupTool
 from ai_cowatcher.retrieval.user_memory import UserMemoryTool
+from ai_cowatcher.storage.object_store import ObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,8 @@ class AgentAnswer:
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    skip_memory: bool = False
+    speak: bool = True
 
 
 class ConversationAgent:
@@ -79,6 +88,7 @@ class ConversationAgent:
         character_lookup: CharacterLookupTool | None = None,
         knowledge_search: KnowledgeSearchTool | None = None,
         user_memory: UserMemoryTool | None = None,
+        object_store: ObjectStore | None = None,
     ):
         self._completion = completion_client
         self._scene_lookup = scene_lookup
@@ -88,6 +98,40 @@ class ConversationAgent:
         self._character_lookup = character_lookup
         self._knowledge_search = knowledge_search
         self._user_memory = user_memory
+        self._object_store = object_store
+
+    def _gated_answer(
+        self,
+        *,
+        question: str,
+    ) -> tuple[AgentAnswer | None, TokenUsage]:
+        from ai_cowatcher.agent.utterance_gate import classify_utterance
+
+        decision = classify_utterance(
+            question,
+            settings=self._settings,
+            completion=self._completion,
+        )
+        usage = decision.usage or TokenUsage.empty()
+        if not decision.short_circuit:
+            return None, usage
+
+        model = self._settings.conversation_fast_model
+        return (
+            AgentAnswer(
+                text=decision.reply,
+                model_tier="fast",
+                model_name=model,
+                escalation_reason=decision.reason,
+                used_context=False,
+                prompt_tokens=usage.prompt_tokens if usage else None,
+                completion_tokens=usage.completion_tokens if usage else None,
+                total_tokens=usage.total_tokens if usage else None,
+                skip_memory=decision.skip_memory or decision.action == "ignore",
+                speak=decision.speak and bool(decision.reply.strip()),
+            ),
+            usage,
+        )
 
     def _available_tools(self) -> list[dict[str, Any]]:
         tools = [SCENE_LOOKUP_TOOL]
@@ -110,9 +154,13 @@ class ConversationAgent:
         user_id: str,
         title_display_name: str | None = None,
     ) -> AgentAnswer:
+        gated, gate_usage = self._gated_answer(question=question)
+        if gated is not None:
+            return gated
+
         tier_selection = self._tier_router.select_tier(question)
         tier_decision = tier_selection.decision
-        usage = tier_selection.usage or TokenUsage.empty()
+        usage = gate_usage.merge(tier_selection.usage or TokenUsage.empty())
 
         confident_title = self._settings.resolve_title_display_name(
             title_id, title_display_name
@@ -129,6 +177,7 @@ class ConversationAgent:
                 confident_title=confident_title,
                 search_title=search_title,
             )
+            reason = "joke_request"
         else:
             text, loop_usage, used_context = self._run_tool_loop(
                 question=question,
@@ -139,17 +188,20 @@ class ConversationAgent:
                 confident_title=confident_title,
                 search_title=search_title,
             )
+            reason = tier_decision.reason
         usage = usage.merge(loop_usage)
 
         return AgentAnswer(
             text=text,
             model_tier=tier_decision.tier,
             model_name=tier_decision.model,
-            escalation_reason=tier_decision.reason,
+            escalation_reason=reason,
             used_context=used_context,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
             total_tokens=usage.total_tokens,
+            skip_memory=False,
+            speak=True,
         )
 
     def answer_stream(
@@ -162,11 +214,37 @@ class ConversationAgent:
         title_display_name: str | None = None,
     ) -> Iterator[AskStreamEvent]:
         """Yield progressive status/token events and a final ``done`` event."""
+        yield AskStreamEvent(type="status", message="Listening for intent…")
+
+        gated, gate_usage = self._gated_answer(question=question)
+        if gated is not None:
+            if gated.text:
+                yield AskStreamEvent(type="status", message="Quick reply…")
+                for piece in _chunk_text_for_stream(gated.text):
+                    yield AskStreamEvent(type="token", text=piece)
+            else:
+                yield AskStreamEvent(
+                    type="status",
+                    message="No clear question — try “what just happened?” or “who’s that?”",
+                )
+            yield AskStreamEvent(
+                type="done",
+                answer=gated.text,
+                model_tier=gated.model_tier,
+                model_name=gated.model_name,
+                escalation_reason=gated.escalation_reason,
+                used_context=False,
+                speak=gated.speak,
+                skip_memory=gated.skip_memory,
+            )
+            del gate_usage
+            return
+
         yield AskStreamEvent(type="status", message="Routing question…")
 
         tier_selection = self._tier_router.select_tier(question)
         tier_decision = tier_selection.decision
-        usage = tier_selection.usage or TokenUsage.empty()
+        usage = gate_usage.merge(tier_selection.usage or TokenUsage.empty())
 
         confident_title = self._settings.resolve_title_display_name(
             title_id, title_display_name
@@ -184,6 +262,7 @@ class ConversationAgent:
                 confident_title=confident_title,
                 search_title=search_title,
             )
+            reason = "joke_request"
         else:
             yield AskStreamEvent(type="status", message="Thinking…")
             text, loop_usage, used_context = yield from self._run_tool_loop_stream(
@@ -195,6 +274,7 @@ class ConversationAgent:
                 confident_title=confident_title,
                 search_title=search_title,
             )
+            reason = tier_decision.reason
         usage = usage.merge(loop_usage)
 
         yield AskStreamEvent(
@@ -202,9 +282,10 @@ class ConversationAgent:
             answer=text,
             model_tier=tier_decision.tier,
             model_name=tier_decision.model,
-            escalation_reason=tier_decision.reason,
+            escalation_reason=reason,
             used_context=used_context,
-            # piggy-back token totals in detail as JSON would break scheme — add fields if needed
+            speak=True,
+            skip_memory=False,
         )
         del usage
 
@@ -220,6 +301,94 @@ class ConversationAgent:
 
     def _answer_max_tokens(self) -> int:
         return self._settings.llm_max_tokens
+
+    def _try_multimodal_answer(
+        self,
+        *,
+        question: str,
+        tool_payloads: list[Any],
+        model: str,
+    ) -> tuple[str, TokenUsage | None] | None:
+        """Answer from retrieved scene audio + text when clips are available."""
+        if not should_use_multimodal(self._settings):
+            return None
+        if self._object_store is None:
+            return None
+        keys = collect_audio_keys(
+            tool_payloads, max_clips=self._settings.multimodal_max_clips
+        )
+        if not keys:
+            return None
+        clips = load_scene_clips(keys, self._object_store)
+        if not clips:
+            return None
+        try:
+            messages = build_multimodal_messages(
+                question=question,
+                tool_payloads=tool_payloads,
+                clips=clips,
+            )
+            result = self._completion.complete(
+                model=model,
+                messages=messages,
+                tools=None,
+                temperature=self._settings.llm_temperature,
+                max_tokens=self._answer_max_tokens(),
+            )
+            text = (result.content or "").strip()
+            if not text:
+                return None
+            logger.info(
+                "Multimodal answer used clips=%d bytes=%d",
+                len(clips),
+                sum(len(b) for _, b in clips),
+            )
+            return text, result.usage
+        except Exception:  # noqa: BLE001 — fall back to text tool path
+            logger.exception("Multimodal scene-audio completion failed; falling back")
+            return None
+
+    def _compose_final_answer(
+        self,
+        *,
+        raw: str | None,
+        question: str,
+        tool_payloads: list[Any],
+        used_context: bool,
+        title_id: str | None,
+        current_ts: float | None,
+        model: str,
+        joke_mode: bool = False,
+    ) -> tuple[str, bool, TokenUsage | None]:
+        if not joke_mode:
+            mm = self._try_multimodal_answer(
+                question=question,
+                tool_payloads=tool_payloads,
+                model=model,
+            )
+            if mm is not None:
+                text, usage = mm
+                final, used = self._finalize_answer(
+                    raw=text,
+                    question=question,
+                    tool_payloads=tool_payloads,
+                    used_context=True,
+                    title_id=title_id,
+                    current_ts=current_ts,
+                    force_lookup_if_empty=False,
+                    joke_mode=False,
+                )
+                return final, used, usage
+        final, used = self._finalize_answer(
+            raw=raw,
+            question=question,
+            tool_payloads=tool_payloads,
+            used_context=used_context,
+            title_id=title_id,
+            current_ts=current_ts,
+            joke_mode=joke_mode,
+        )
+        return final, used, None
 
     def _force_scene_grounding(
         self,
@@ -445,14 +614,17 @@ class ConversationAgent:
             usage = usage.merge(result.usage)
 
             if not result.tool_calls:
-                answer_text, used_context = self._finalize_answer(
+                answer_text, used_context, mm_usage = self._compose_final_answer(
                     raw=result.content,
                     question=question,
                     tool_payloads=tool_payloads,
                     used_context=used_context,
                     title_id=title_id,
                     current_ts=current_ts,
+                    model=tier_decision.model,
                 )
+                if mm_usage is not None:
+                    usage = usage.merge(mm_usage)
                 yield AskStreamEvent(type="status", message="Answering…")
                 for piece in _chunk_text_for_stream(answer_text):
                     yield AskStreamEvent(type="token", text=piece)
@@ -508,14 +680,17 @@ class ConversationAgent:
             max_tokens=self._answer_max_tokens(),
         ):
             parts.append(delta)
-        answer_text, used_context = self._finalize_answer(
+        answer_text, used_context, mm_usage = self._compose_final_answer(
             raw="".join(parts),
             question=question,
             tool_payloads=tool_payloads,
             used_context=used_context,
             title_id=title_id,
             current_ts=current_ts,
+            model=tier_decision.model,
         )
+        if mm_usage is not None:
+            usage = usage.merge(mm_usage)
         for piece in _chunk_text_for_stream(answer_text):
             yield AskStreamEvent(type="token", text=piece)
         return answer_text, usage, used_context
@@ -548,14 +723,17 @@ class ConversationAgent:
             usage = usage.merge(result.usage)
 
             if not result.tool_calls:
-                text, used_context = self._finalize_answer(
+                text, used_context, mm_usage = self._compose_final_answer(
                     raw=result.content,
                     question=question,
                     tool_payloads=tool_payloads,
                     used_context=used_context,
                     title_id=title_id,
                     current_ts=current_ts,
+                    model=tier_decision.model,
                 )
+                if mm_usage is not None:
+                    usage = usage.merge(mm_usage)
                 return text, usage, used_context
 
             messages.append(self._assistant_tool_calls_message(result))
@@ -581,6 +759,25 @@ class ConversationAgent:
                         "content": json.dumps(payload),
                     }
                 )
+
+        # Exhausted tool rounds — try multimodal with whatever tools returned.
+        mm = self._try_multimodal_answer(
+            question=question,
+            tool_payloads=tool_payloads,
+            model=tier_decision.model,
+        )
+        if mm is not None:
+            text, mm_usage = mm
+            if mm_usage is not None:
+                usage = usage.merge(mm_usage)
+            final, used = self._finalize_answer(
+                raw=text,
+                question=question,
+                tool_payloads=tool_payloads,
+                used_context=True,
+                force_lookup_if_empty=False,
+            )
+            return final, usage, used
 
         fallback = grounded_fallback_answer(question, tool_payloads)
         return (fallback or _UNKNOWN_ANSWER), usage, bool(tool_payloads) or used_context
@@ -723,6 +920,7 @@ def build_conversation_agent(
     character_lookup: CharacterLookupTool | None = None,
     knowledge_search: KnowledgeSearchTool | None = None,
     user_memory: UserMemoryTool | None = None,
+    object_store: ObjectStore | None = None,
 ) -> ConversationAgent:
     completion = completion_client or build_completion_client(settings)
     return ConversationAgent(
@@ -734,4 +932,5 @@ def build_conversation_agent(
         character_lookup=character_lookup,
         knowledge_search=knowledge_search,
         user_memory=user_memory,
+        object_store=object_store,
     )

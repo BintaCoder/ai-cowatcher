@@ -35,6 +35,7 @@ def init_database(engine=None, settings: Settings | None = None) -> None:
 
 def _apply_lightweight_migrations(engine) -> None:
     """Pilot-safe additive migrations (no Alembic yet)."""
+    dialect = engine.dialect.name
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -48,9 +49,36 @@ def _apply_lightweight_migrations(engine) -> None:
                 "ADD COLUMN IF NOT EXISTS credits_start_ts DOUBLE PRECISION"
             )
         )
-        conn.execute(
-            text(
-                "ALTER TABLE scene_events "
-                "ADD COLUMN IF NOT EXISTS speaker_cluster_ids JSONB DEFAULT '[]'::jsonb"
+        if dialect == "sqlite":
+            # SQLite lacks IF NOT EXISTS for ADD COLUMN on older versions; ignore duplicates.
+            try:
+                conn.execute(
+                    text(
+                        "ALTER TABLE scene_events "
+                        "ADD COLUMN speaker_cluster_ids TEXT DEFAULT '[]'"
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                conn.execute(
+                    text(
+                        "ALTER TABLE scene_events "
+                        "ADD COLUMN audio_object_key VARCHAR(512)"
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            conn.execute(
+                text(
+                    "ALTER TABLE scene_events "
+                    "ADD COLUMN IF NOT EXISTS speaker_cluster_ids JSONB DEFAULT '[]'::jsonb"
+                )
             )
-        )
+            conn.execute(
+                text(
+                    "ALTER TABLE scene_events "
+                    "ADD COLUMN IF NOT EXISTS audio_object_key VARCHAR(512)"
+                )
+            )
