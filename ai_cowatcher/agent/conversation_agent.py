@@ -47,6 +47,12 @@ from ai_cowatcher.agent.tools import (
     USER_MEMORY_TOOL,
 )
 from ai_cowatcher.config import Settings
+from ai_cowatcher.observability.ask_latency import (
+    STAGE_GATE,
+    STAGE_MULTIMODAL,
+    STAGE_SCENE_RETRIEVE,
+    AskLatencyTracker,
+)
 from ai_cowatcher.observability.llm_cost import (
     estimate_messages_tokens,
     estimate_tokens_from_text,
@@ -176,8 +182,12 @@ class ConversationAgent:
         question: str,
         user_id: str,
         title_display_name: str | None = None,
+        latency: AskLatencyTracker | None = None,
+        query_embedding: list[float] | None = None,
     ) -> AgentAnswer:
-        gated, gate_usage = self._gated_answer(question=question)
+        latency = latency or AskLatencyTracker(path="ask")
+        with latency.stage(STAGE_GATE):
+            gated, gate_usage = self._gated_answer(question=question)
         if gated is not None:
             return gated
 
@@ -189,6 +199,8 @@ class ConversationAgent:
                 user_id=user_id,
                 title_display_name=title_display_name,
                 gate_usage=gate_usage,
+                latency=latency,
+                query_embedding=query_embedding,
             )
 
         tier_selection = self._tier_router.select_tier(question)
@@ -245,11 +257,15 @@ class ConversationAgent:
         question: str,
         user_id: str,
         title_display_name: str | None = None,
+        latency: AskLatencyTracker | None = None,
+        query_embedding: list[float] | None = None,
     ) -> Iterator[AskStreamEvent]:
         """Yield progressive status/token events and a final ``done`` event."""
+        latency = latency or AskLatencyTracker(path="ask_stream")
         yield AskStreamEvent(type="status", message="Listening for intent…")
 
-        gated, gate_usage = self._gated_answer(question=question)
+        with latency.stage(STAGE_GATE):
+            gated, gate_usage = self._gated_answer(question=question)
         if gated is not None:
             if gated.text:
                 yield AskStreamEvent(type="status", message="Quick reply…")
@@ -282,6 +298,8 @@ class ConversationAgent:
                 user_id=user_id,
                 title_display_name=title_display_name,
                 gate_usage=gate_usage,
+                latency=latency,
+                query_embedding=query_embedding,
             )
             return
 
@@ -306,6 +324,7 @@ class ConversationAgent:
                 tier_decision=tier_decision,
                 confident_title=confident_title,
                 search_title=search_title,
+                latency=latency,
             )
             reason = "joke_request"
         else:
@@ -318,6 +337,7 @@ class ConversationAgent:
                 tier_decision=tier_decision,
                 confident_title=confident_title,
                 search_title=search_title,
+                latency=latency,
             )
             reason = tier_decision.reason
         usage = usage.merge(loop_usage)
@@ -340,6 +360,7 @@ class ConversationAgent:
         question: str,
         title_id: str,
         current_ts: float,
+        query_embedding: list[float] | None = None,
     ) -> tuple[list[Any], str]:
         """Speculative scene_lookup so the tagged completion is grounded."""
         query = joke_scene_query(question) if is_joke_request(question) else question
@@ -348,6 +369,7 @@ class ConversationAgent:
                 title_id=title_id,
                 query_text=query,
                 current_ts=current_ts,
+                query_vector=query_embedding,
             )
         raw_payload = [hit.to_tool_dict() for hit in hits]
         if not raw_payload:
@@ -493,12 +515,19 @@ class ConversationAgent:
         user_id: str,
         title_display_name: str | None,
         gate_usage: TokenUsage,
+        latency: AskLatencyTracker | None = None,
+        query_embedding: list[float] | None = None,
     ) -> AgentAnswer:
         del title_display_name  # evidence path only for now
         model = self._settings.conversation_fast_model
-        payloads, scene_evidence = self._prefetch_scene_evidence(
-            question=question, title_id=title_id, current_ts=current_ts
-        )
+        latency = latency or AskLatencyTracker(path="ask")
+        with latency.stage(STAGE_SCENE_RETRIEVE):
+            payloads, scene_evidence = self._prefetch_scene_evidence(
+                question=question,
+                title_id=title_id,
+                current_ts=current_ts,
+                query_embedding=query_embedding,
+            )
         used_context = bool(payloads)
         messages = self._merged_messages(
             title_id=title_id,
@@ -506,13 +535,18 @@ class ConversationAgent:
             question=question,
             scene_evidence=scene_evidence,
         )
+        max_tokens = self._answer_max_tokens(question)
+        t_llm = latency
+        t_llm.mark_llm_request_sent()
         result = self._completion.complete(
             model=model,
             messages=messages,
             tools=None,
             temperature=self._settings.llm_temperature,
-            max_tokens=self._answer_max_tokens(),
+            max_tokens=max_tokens,
         )
+        t_llm.mark_llm_first_token()
+        t_llm.mark_llm_stream_complete()
         usage = gate_usage.merge(result.usage or TokenUsage.empty())
         prompt_override = None
         if result.usage is None or result.usage.prompt_tokens is None:
@@ -528,17 +562,17 @@ class ConversationAgent:
 
         tag = parsed.tag
         body = parsed.body
-        # If multimodal preferred for CONTENT, only run it when text body is weak.
+        # Multimodal only when text body is weak — never on good text (extra Gemini).
+        reason_suffix = ""
         if tag == "CONTENT" and payloads:
             body_ok = bool((body or "").strip()) and not is_refusal_answer(body or "")
-            if body_ok:
-                reason_suffix = ""
-            else:
-                mm = self._try_multimodal_answer(
-                    question=question,
-                    tool_payloads=payloads,
-                    model=model,
-                )
+            if not body_ok:
+                with latency.stage(STAGE_MULTIMODAL):
+                    mm = self._try_multimodal_answer(
+                        question=question,
+                        tool_payloads=payloads,
+                        model=model,
+                    )
                 if mm is not None:
                     mm_text, mm_usage = mm
                     if mm_usage is not None:
@@ -546,10 +580,6 @@ class ConversationAgent:
                     body = mm_text
                     used_context = True
                     reason_suffix = "+multimodal"
-                else:
-                    reason_suffix = ""
-        else:
-            reason_suffix = ""
 
         text, speak, skip_memory, navigate, reason = self._resolve_merged_tag(
             tag=tag,
@@ -581,16 +611,23 @@ class ConversationAgent:
         user_id: str,
         title_display_name: str | None,
         gate_usage: TokenUsage,
+        latency: AskLatencyTracker | None = None,
+        query_embedding: list[float] | None = None,
     ) -> Iterator[AskStreamEvent]:
         del title_display_name
         model = self._settings.conversation_fast_model
+        latency = latency or AskLatencyTracker(path="ask_stream")
         yield AskStreamEvent(type="status", message="Checking scenes…")
         yield AskStreamEvent(
             type="tool_start", tool="scene_lookup", message="Checking scenes…"
         )
-        payloads, scene_evidence = self._prefetch_scene_evidence(
-            question=question, title_id=title_id, current_ts=current_ts
-        )
+        with latency.stage(STAGE_SCENE_RETRIEVE):
+            payloads, scene_evidence = self._prefetch_scene_evidence(
+                question=question,
+                title_id=title_id,
+                current_ts=current_ts,
+                query_embedding=query_embedding,
+            )
         yield AskStreamEvent(
             type="tool_end", tool="scene_lookup", message="scene_lookup done"
         )
@@ -607,57 +644,18 @@ class ConversationAgent:
         tag: str | None = None
         body_parts: list[str] = []
         emit_tokens = True  # set False for FILLER / NAVIGATE after tag
+        first_client_token = True
+        max_tokens = self._answer_max_tokens(question)
 
-        # Prefer multimodal only when it won't stack on a text-only path already good
-        # enough; streaming wants tokens ASAP (merged path). Full multimodal still for empty clips path.
-        prefer_mm = (
-            payloads
-            and should_use_multimodal(self._settings)
-            and self._object_store
-            and getattr(self._settings, "multimodal_prefer_over_text", False)
-        )
-        if prefer_mm:
-            mm = self._try_multimodal_answer(
-                question=question,
-                tool_payloads=payloads,
-                model=model,
-            )
-            if mm is not None:
-                mm_text, mm_usage = mm
-                self._record_llm_cost(
-                    model=model, path="merged_multimodal", usage=mm_usage, user_id=user_id
-                )
-                del mm_usage, gate_usage
-                text, speak, skip_memory, navigate, reason = self._resolve_merged_tag(
-                    tag="CONTENT",
-                    body=mm_text,
-                    question=question,
-                    tool_payloads=payloads,
-                    used_context=True,
-                )
-                yield AskStreamEvent(type="intent", intent="CONTENT", message="CONTENT")
-                for piece in _chunk_text_for_stream(text):
-                    yield AskStreamEvent(type="token", text=piece)
-                yield AskStreamEvent(
-                    type="done",
-                    answer=text,
-                    model_tier="fast",
-                    model_name=model,
-                    escalation_reason=reason + "+multimodal",
-                    used_context=True,
-                    speak=speak and not navigate,
-                    skip_memory=skip_memory,
-                    intent="CONTENT",
-                    navigate=navigate,
-                )
-                return
-
-        raw_stream = []
+        # Never start multimodal before/while streaming text. MM is post-hoc for
+        # non-stream weak answers only; stream path optimizes TTFT.
+        raw_stream: list[str] = []
         for delta in self._completion.complete_stream(
             model=model,
             messages=messages,
             temperature=self._settings.llm_temperature,
-            max_tokens=self._answer_max_tokens(),
+            max_tokens=max_tokens,
+            latency=latency,
         ):
             raw_stream.append(delta)
             for kind, value in parser.feed(delta):
@@ -670,6 +668,17 @@ class ConversationAgent:
                     body_parts.append(value)
                     # Stream body only for SOCIAL / JOKE / CONTENT
                     if tag in ("SOCIAL", "JOKE", "CONTENT") or tag is None:
+                        if first_client_token:
+                            first_client_token = False
+                            logger.info(
+                                json.dumps(
+                                    {
+                                        "event": "llm_stream_first_token_forwarded",
+                                        "model": model,
+                                    },
+                                    separators=(",", ":"),
+                                )
+                            )
                         yield AskStreamEvent(type="token", text=value)
 
         for kind, value in parser.finish():
@@ -728,7 +737,6 @@ class ConversationAgent:
             navigate=navigate,
         )
 
-
     def _force_fast_tier(self, _tier_decision: ModelTierDecision, *, reason: str) -> ModelTierDecision:
         return ModelTierDecision(
             tier="fast",
@@ -739,8 +747,22 @@ class ConversationAgent:
     def _tool_max_tokens(self) -> int:
         return max(self._settings.llm_max_tokens, self._settings.llm_tool_max_tokens)
 
-    def _answer_max_tokens(self) -> int:
-        return self._settings.llm_max_tokens
+    def _answer_max_tokens(self, question: str = "") -> int:
+        """Pilot defaults favor TTFT: shorter caps for simple who/what lines."""
+        base = int(self._settings.llm_max_tokens)
+        short_cap = int(
+            getattr(self._settings, "llm_short_answer_max_tokens", 256) or 256
+        )
+        q = (question or "").strip()
+        if not q:
+            return min(base, short_cap)
+        lower = q.lower()
+        if len(q) <= 48 and not any(
+            token in lower
+            for token in ("explain", "why", "how ", "summar", "compare", "theme")
+        ):
+            return min(base, short_cap)
+        return base
 
     def _try_multimodal_answer(
         self,
@@ -773,7 +795,7 @@ class ConversationAgent:
                 messages=messages,
                 tools=None,
                 temperature=self._settings.llm_temperature,
-                max_tokens=self._answer_max_tokens(),
+                max_tokens=self._answer_max_tokens(question),
             )
             text = (result.content or "").strip()
             if not text:
@@ -915,7 +937,7 @@ class ConversationAgent:
             messages=messages,
             tools=None,
             temperature=min(0.85, max(0.55, self._settings.llm_temperature + 0.3)),
-            max_tokens=self._answer_max_tokens(),
+            max_tokens=self._answer_max_tokens(question),
         )
         text, used = self._finalize_answer(
             raw=result.content,
@@ -936,6 +958,7 @@ class ConversationAgent:
         tier_decision: ModelTierDecision,
         confident_title: str | None = None,
         search_title: str | None = None,
+        latency: AskLatencyTracker | None = None,
     ) -> Iterator[AskStreamEvent]:
         yield AskStreamEvent(type="status", message="Checking the scene…")
         yield AskStreamEvent(type="tool_start", tool="scene_lookup", message="Checking the scene…")
@@ -962,9 +985,11 @@ class ConversationAgent:
             model=tier_decision.model,
             messages=messages,
             temperature=min(0.85, max(0.55, self._settings.llm_temperature + 0.3)),
-            max_tokens=self._answer_max_tokens(),
+            max_tokens=self._answer_max_tokens(question),
+            latency=latency,
         ):
             parts.append(delta)
+            yield AskStreamEvent(type="token", text=delta)
         # complete_stream may not report usage — empty is fine for joke path
         answer_text, used = self._finalize_answer(
             raw="".join(parts),
@@ -974,8 +999,7 @@ class ConversationAgent:
             joke_mode=True,
             force_lookup_if_empty=False,
         )
-        for piece in _chunk_text_for_stream(answer_text):
-            yield AskStreamEvent(type="token", text=piece)
+        # done.answer is source of truth if finalize rewrote; tokens already forwarded.
         return answer_text, usage, used
 
     def _joke_grounded_messages(
@@ -1038,6 +1062,7 @@ class ConversationAgent:
         tier_decision,
         confident_title: str | None = None,
         search_title: str | None = None,
+        latency: AskLatencyTracker | None = None,
     ) -> Iterator[AskStreamEvent]:
         """Yield stream events; return value is (text, usage, used_context)."""
         record_legacy_tool_path()
@@ -1127,9 +1152,11 @@ class ConversationAgent:
             model=tier_decision.model,
             messages=messages,
             temperature=self._settings.llm_temperature,
-            max_tokens=self._answer_max_tokens(),
+            max_tokens=self._answer_max_tokens(question),
+            latency=latency,
         ):
             parts.append(delta)
+            yield AskStreamEvent(type="token", text=delta)
         answer_text, used_context, mm_usage = self._compose_final_answer(
             raw="".join(parts),
             question=question,
@@ -1141,8 +1168,7 @@ class ConversationAgent:
         )
         if mm_usage is not None:
             usage = usage.merge(mm_usage)
-        for piece in _chunk_text_for_stream(answer_text):
-            yield AskStreamEvent(type="token", text=piece)
+        # Tokens already streamed; done.answer may differ after finalize/grounding.
         return answer_text, usage, used_context
 
     def _run_tool_loop(

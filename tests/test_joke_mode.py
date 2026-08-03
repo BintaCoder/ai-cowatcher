@@ -99,7 +99,7 @@ def test_ask_joke_returns_one_liner():
         question="joke",
         user_id="tester",
     )
-    assert result.escalation_reason == "joke_request"
+    assert result.escalation_reason in ("joke_request", "merged:JOKE")
     assert result.model_tier == "fast"
     assert result.answer
     assert "not sure yet" not in result.answer.lower()

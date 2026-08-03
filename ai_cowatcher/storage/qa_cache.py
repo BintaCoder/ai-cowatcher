@@ -289,28 +289,98 @@ class QACache:
     def lookup(
         self, title_id: str, current_ts: float, question: str
     ) -> CachedAnswer | None:
-        """Exact first (near-zero cost), then semantic. None on full miss."""
+        """Exact first (near-zero cost), then semantic. None on full miss.
+
+        Exact hits never call the embedder. Semantic embed runs only on exact miss.
+        Stage timings are logged as ``qa_cache_lookup`` for latency dashboards.
+        """
         self.last_query_embedding = None
+        t0 = time.perf_counter()
+
+        t_exact = time.perf_counter()
         hit = self._exact_lookup(title_id, current_ts, question)
+        exact_ms = (time.perf_counter() - t_exact) * 1000.0
         if hit and hit.answer.strip():
             self._record_cache_metric("exact_hit")
+            self._log_lookup_stages(
+                result="exact_hit",
+                exact_ms=exact_ms,
+                embed_ms=0.0,
+                semantic_ms=0.0,
+                total_ms=(time.perf_counter() - t0) * 1000.0,
+            )
             return hit
 
+        # Semantic tier only: embed after exact miss (never on exact hit path).
+        embed_ms = 0.0
+        semantic_ms = 0.0
         try:
+            t_embed = time.perf_counter()
             embedding = self._embedder.embed_texts([question])[0]
+            embed_ms = (time.perf_counter() - t_embed) * 1000.0
         except Exception:  # noqa: BLE001
             logger.exception("QA cache embed failed")
             self._record_cache_metric("miss")
+            self._log_lookup_stages(
+                result="miss",
+                exact_ms=exact_ms,
+                embed_ms=embed_ms,
+                semantic_ms=0.0,
+                total_ms=(time.perf_counter() - t0) * 1000.0,
+            )
             return None
 
+        t_sem = time.perf_counter()
         hit = self._semantic_lookup(title_id, current_ts, embedding)
+        semantic_ms = (time.perf_counter() - t_sem) * 1000.0
         if hit:
             self._record_cache_metric("semantic_hit")
+            self._log_lookup_stages(
+                result="semantic_hit",
+                exact_ms=exact_ms,
+                embed_ms=embed_ms,
+                semantic_ms=semantic_ms,
+                total_ms=(time.perf_counter() - t0) * 1000.0,
+            )
             return hit
 
         self.last_query_embedding = embedding
         self._record_cache_metric("miss")
+        self._log_lookup_stages(
+            result="miss",
+            exact_ms=exact_ms,
+            embed_ms=embed_ms,
+            semantic_ms=semantic_ms,
+            total_ms=(time.perf_counter() - t0) * 1000.0,
+        )
         return None
+
+    @staticmethod
+    def _log_lookup_stages(
+        *,
+        result: str,
+        exact_ms: float,
+        embed_ms: float,
+        semantic_ms: float,
+        total_ms: float,
+    ) -> None:
+        try:
+            logger.info(
+                json.dumps(
+                    {
+                        "event": "qa_cache_lookup",
+                        "result": result,
+                        "exact_ms": round(exact_ms, 2),
+                        "embed_ms": round(embed_ms, 2),
+                        "semantic_ms": round(semantic_ms, 2),
+                        "total_ms": round(total_ms, 2),
+                        "exact_only": result == "exact_hit",
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _record_cache_metric(result: str) -> None:

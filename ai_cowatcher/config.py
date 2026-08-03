@@ -112,6 +112,17 @@ class Settings(BaseSettings):
     evidence_max_chars_per_field: int = Field(
         default=280, alias="EVIDENCE_MAX_CHARS_PER_FIELD"
     )
+    # Short-lived reuse of BGE query vectors for similar/repeated questions.
+    query_embedding_cache_ttl_sec: float = Field(
+        default=90.0, alias="QUERY_EMBEDDING_CACHE_TTL_SEC"
+    )
+    query_embedding_cache_max: int = Field(
+        default=256, alias="QUERY_EMBEDDING_CACHE_MAX"
+    )
+    # Cap completion tokens for brief who/what lines (TTFT-friendly under Gemini 3).
+    llm_short_answer_max_tokens: int = Field(
+        default=256, alias="LLM_SHORT_ANSWER_MAX_TOKENS"
+    )
 
     # ── FFmpeg (subprocess) ───────────────────────────────────────────────────
     ffmpeg_bin: str = Field(default="ffmpeg", alias="FFMPEG_BIN")

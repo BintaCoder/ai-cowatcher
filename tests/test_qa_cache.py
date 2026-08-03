@@ -102,6 +102,22 @@ def test_should_cache_filters():
     )
 
 
+def test_exact_hit_skips_embedder(cache_settings: Settings):
+    embedder = MagicMock(wraps=MockTextEmbedder())
+    cache = QACache(
+        exact_kv=InMemoryExactKV(),
+        qdrant=QdrantClient(":memory:"),
+        embedder=embedder,
+        settings=cache_settings,
+    )
+    cache.store("t1", 10.0, "Who is that?", "Ross.")
+    embedder.embed_texts.reset_mock()
+    hit = cache.lookup("t1", 12.0, "who is that")
+    assert hit is not None
+    assert hit.source == "exact"
+    embedder.embed_texts.assert_not_called()
+
+
 def test_session_cache_round_trip(cache_settings: Settings):
     agent = MagicMock()
     agent.answer.return_value = MagicMock(

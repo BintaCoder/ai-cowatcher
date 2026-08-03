@@ -35,6 +35,13 @@ ASK_MODEL_TIER_TOTAL = Counter(
     labelnames=("tier",),
 )
 
+ASK_STAGE_DURATION = Histogram(
+    "cowatcher_ask_stage_duration_seconds",
+    "Per-stage latency for POST /ask and /ask/stream",
+    labelnames=("stage",),
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
 # ── Tool calls ────────────────────────────────────────────────────────────────
 
 TOOL_CALL_DURATION = Histogram(
@@ -143,6 +150,14 @@ PROMPT_TOKENS_PER_ASK = Histogram(
     buckets=(50, 100, 200, 400, 800, 1600, 3200, 6400),
 )
 
+UTTERANCE_GATE_TOTAL = Counter(
+    "cowatcher_utterance_gate_total",
+    "Utterance gate outcomes (heuristic free resolve vs agent fallthrough)",
+    labelnames=("outcome", "action"),
+    # outcome: free (short-circuit, no LLM) | agent (needs merged/legacy agent)
+    #          | prompt_llm (legacy YES/NO gate model)
+)
+
 
 def observe_ask_record(record: AskRecord) -> None:
     ASK_REQUESTS_TOTAL.labels(status="success").inc()
@@ -150,6 +165,15 @@ def observe_ask_record(record: AskRecord) -> None:
     ASK_MODEL_TIER_TOTAL.labels(tier=record.model_tier).inc()
     if record.dont_know:
         ASK_DONT_KNOW_TOTAL.inc()
+
+
+def observe_ask_stages(stages_ms: dict[str, float]) -> None:
+    """Record per-stage durations from AskLatencyTracker."""
+    for stage, ms in stages_ms.items():
+        try:
+            ASK_STAGE_DURATION.labels(stage=str(stage)).observe(float(ms) / 1000.0)
+        except Exception:  # noqa: BLE001
+            continue
 
 
 def record_ask_error() -> None:
@@ -169,6 +193,14 @@ def record_qa_cache_result(result: str) -> None:
 
 def record_legacy_tool_path() -> None:
     LEGACY_TOOL_PATH_TOTAL.inc()
+
+
+def record_utterance_gate(*, outcome: str, action: str) -> None:
+    """outcome: free | agent | prompt_llm; action: ignore|social|content|…"""
+    UTTERANCE_GATE_TOTAL.labels(
+        outcome=outcome or "agent",
+        action=action or "content",
+    ).inc()
 
 
 def record_llm_token_usage(

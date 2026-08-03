@@ -14,6 +14,10 @@ from ai_cowatcher.agent.stream_events import AskStreamEvent
 from ai_cowatcher.config import Settings, get_settings
 from ai_cowatcher.db.base import create_db_engine, init_database
 from ai_cowatcher.interfaces import TextEmbedder
+from ai_cowatcher.observability.ask_latency import (
+    STAGE_CACHE_LOOKUP,
+    AskLatencyTracker,
+)
 from ai_cowatcher.observability.ask_telemetry import AskRecord, is_dont_know_answer, record_ask_request
 from ai_cowatcher.providers import mock
 from ai_cowatcher.providers.real import BgeM3Embedder
@@ -181,13 +185,25 @@ class ViewingSession:
         user_id: str,
         persist_memory: bool = True,
     ) -> AskResult:
+        latency = AskLatencyTracker(path="ask")
+        latency.set_meta(title_id=title_id, user_id=user_id)
         started = time.perf_counter()
-        hit = self._cache_lookup(
-            title_id=title_id, current_ts=current_ts, question=question
-        )
+        with latency.stage(STAGE_CACHE_LOOKUP):
+            hit = self._cache_lookup(
+                title_id=title_id, current_ts=current_ts, question=question
+            )
+        query_embedding = None
+        if hit is None and self._qa_cache is not None:
+            query_embedding = getattr(self._qa_cache, "last_query_embedding", None)
         if hit is not None:
             latency_ms = (time.perf_counter() - started) * 1000.0
             reason = f"cache:{hit.source}"
+            latency.set_meta(
+                model_tier="cache",
+                escalation_reason=reason,
+                cache_source=hit.source,
+            )
+            latency.finish()
             record_ask_request(
                 AskRecord(
                     title_id=title_id,
@@ -236,8 +252,15 @@ class ViewingSession:
             question=question,
             user_id=user_id,
             title_display_name=title_display_name,
+            latency=latency,
+            query_embedding=query_embedding,
         )
         latency_ms = (time.perf_counter() - started) * 1000.0
+        latency.set_meta(
+            model_tier=answer.model_tier,
+            escalation_reason=answer.escalation_reason,
+        )
+        latency.finish()
 
         record_ask_request(
             AskRecord(
@@ -302,11 +325,20 @@ class ViewingSession:
         persist_memory: bool = True,
     ) -> Iterator[AskStreamEvent]:
         """Yield AskStreamEvent objects; records telemetry and optional memory on done."""
+        latency = AskLatencyTracker(path="ask_stream")
+        latency.set_meta(title_id=title_id, user_id=user_id)
         started = time.perf_counter()
 
-        hit = self._cache_lookup(
-            title_id=title_id, current_ts=current_ts, question=question
-        )
+        # SSE status as early as possible (before any work that might block).
+        yield AskStreamEvent(type="status", message="Looking up…")
+
+        with latency.stage(STAGE_CACHE_LOOKUP):
+            hit = self._cache_lookup(
+                title_id=title_id, current_ts=current_ts, question=question
+            )
+        query_embedding = None
+        if hit is None and self._qa_cache is not None:
+            query_embedding = getattr(self._qa_cache, "last_query_embedding", None)
         if hit is not None:
             yield AskStreamEvent(
                 type="status", message=f"Cache hit ({hit.source})…"
@@ -315,6 +347,12 @@ class ViewingSession:
                 yield AskStreamEvent(type="token", text=piece)
             latency_ms = (time.perf_counter() - started) * 1000.0
             reason = f"cache:{hit.source}"
+            latency.set_meta(
+                model_tier="cache",
+                escalation_reason=reason,
+                cache_source=hit.source,
+            )
+            latency.finish()
             record_ask_request(
                 AskRecord(
                     title_id=title_id,
@@ -365,6 +403,8 @@ class ViewingSession:
             question=question,
             user_id=user_id,
             title_display_name=title_display_name,
+            latency=latency,
+            query_embedding=query_embedding,
         ):
             if event.type == "token" and event.text:
                 answer_text += event.text
@@ -387,6 +427,11 @@ class ViewingSession:
                     intent=event.intent,
                     navigate=event.navigate,
                 )
+                latency.set_meta(
+                    model_tier=event.model_tier or "fast",
+                    escalation_reason=event.escalation_reason or "",
+                )
+                latency.finish()
                 record_ask_request(
                     AskRecord(
                         title_id=title_id,

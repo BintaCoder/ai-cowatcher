@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -10,6 +12,8 @@ from ai_cowatcher.agent.completion import CompletionClient
 from ai_cowatcher.agent.joke_intent import is_joke_request
 from ai_cowatcher.agent.token_usage import TokenUsage
 from ai_cowatcher.config import Settings
+
+logger = logging.getLogger("ai_cowatcher.gate")
 
 GateAction = Literal["ignore", "social", "joke", "navigate", "content", "off_topic"]
 
@@ -114,6 +118,49 @@ class UtteranceDecision:
 
 
 def classify_utterance(
+    question: str,
+    *,
+    settings: Settings,
+    completion: CompletionClient | None = None,
+) -> UtteranceDecision:
+    """Heuristic gate first; optional mini LLM only when ambiguous."""
+    decision = _classify_utterance_inner(
+        question, settings=settings, completion=completion
+    )
+    _record_gate_outcome(decision)
+    return decision
+
+
+def _record_gate_outcome(decision: UtteranceDecision) -> None:
+    reason = decision.reason or ""
+    if reason.startswith("gate:prompt_"):
+        outcome = "prompt_llm"
+    elif decision.short_circuit:
+        outcome = "free"
+    else:
+        # navigate / joke / content / merged_pending — agent path continues
+        outcome = "agent"
+    try:
+        from ai_cowatcher.observability.prometheus_metrics import record_utterance_gate
+
+        record_utterance_gate(outcome=outcome, action=decision.action)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info(
+        json.dumps(
+            {
+                "event": "utterance_gate",
+                "outcome": outcome,
+                "action": decision.action,
+                "reason": decision.reason,
+                "short_circuit": decision.short_circuit,
+            },
+            separators=(",", ":"),
+        )
+    )
+
+
+def _classify_utterance_inner(
     question: str,
     *,
     settings: Settings,

@@ -413,6 +413,26 @@ qa_cache (exact + Qdrant semantic)
 
 Wall clock often **~2–6s** with flash-lite / network variance (not 15s multi-tool).
 
+### Stage breakdown (instrumented)
+
+Each `/ask` and `/ask/stream` emits a structured **`ask_latency_stages`** JSON log and
+Prometheus histogram `cowatcher_ask_stage_duration_seconds{stage=…}` for:
+
+| Stage | Meaning |
+|-------|---------|
+| `cache_lookup` | Exact Redis (+ semantic Qdrant only on exact miss) |
+| `gate` | Heuristic utterance gate (rules; free on clear filler/social) |
+| `scene_retrieve` | Playhead-local Qdrant **or** BGE embed + ANN |
+| `llm_ttft` | Request → first Gemini delta (time-to-first-token) |
+| `llm_total` | Full stream (request → last delta) |
+| `multimodal` | Optional post-text audio path (non-stream weak answers only) |
+| `total` | End-to-end wall clock |
+
+Related stream logs: `llm_stream_request` → `llm_stream_first_token` →
+`llm_stream_first_token_forwarded` → `llm_stream_complete`. Scene path logs
+`scene_lookup_path` with `skip_bge: true` on playhead hits. QA cache logs
+`qa_cache_lookup` with `exact_ms` / `embed_ms` / `semantic_ms` (exact never embeds).
+
 ### What used to burn 15s
 
 | Hop | Cost |
@@ -430,13 +450,36 @@ Wall clock often **~2–6s** with flash-lite / network variance (not 15s multi-t
 | Force single-answer path | `PILOT_LOW_LATENCY=true` |
 | Merged gate | `UTTERANCE_GATE_STRATEGY=merged` |
 | Disable multi-hop by default | Pilot flag above |
-| Playhead retrieve | SceneLookup fast path for “on screen” |
-| No multimodal stack | `MULTIMODAL_SCENE_AUDIO_ENABLED=false` |
-| Token headroom | `LLM_MAX_TOKENS=512+`, `LLM_REASONING_EFFORT=minimal` |
+| Playhead retrieve (skip BGE) | “on screen / who is that / what just happened” → Qdrant playhead |
+| Query embed TTL reuse | `QUERY_EMBEDDING_CACHE_TTL_SEC`, `QUERY_EMBEDDING_CACHE_MAX` |
+| No multimodal on hot path | `MULTIMODAL_SCENE_AUDIO_ENABLED=false`; stream never starts MM while texting |
+| Token headroom / TTFT | `LLM_MAX_TOKENS`, `LLM_SHORT_ANSWER_MAX_TOKENS`, `LLM_REASONING_EFFORT=minimal` |
+| Evidence trim | `EVIDENCE_MAX_SCENES`, `EVIDENCE_MAX_CHARS_PER_FIELD` |
 | Fast model | e.g. `gemini/gemini-3.5-flash-lite` |
-| Warm BGE | `make api` **without** `--reload` |
-| QA cache | `QA_CACHE_ENABLED=true` for demo repeats |
+| Warm BGE + LiteLLM HTTP pool | `make api` **without** `--reload`; lifespan installs shared httpx client |
+| QA cache | `QA_CACHE_ENABLED=true`; demos: `cowatcher-warm-qa-cache` |
+| Gate free-hit metrics | `cowatcher_utterance_gate_total{outcome=free\|agent\|prompt_llm}` + log `utterance_gate` |
 | Offload | `asyncio.to_thread` for agent work |
+
+### Gate free-hit rate
+
+Structured log event **`utterance_gate`** records whether heuristics resolved free of the
+LLM (`outcome=free`: filler/social/off-topic short-circuit) vs fallthrough to the agent
+(`outcome=agent`, including `merged_pending`). Do **not** tighten filler rules without a
+labeled sample of real mic lines — use these metrics to measure over-routing first.
+
+Run Redis co-located with the API process when possible so exact hits stay
+sub-millisecond after the pilot moves off a single laptop. For non-playhead questions,
+set `EMBEDDING_DEVICE` to `cuda` / `mps` when a GPU is available (playhead-local path
+skips BGE entirely).
+
+### Demo warm-cache
+
+```bash
+# Pre-seed exact + semantic QA answers for scripted walkthroughs
+cowatcher-warm-qa-cache
+# or: PYTHONPATH=. python -m ai_cowatcher.qa.warm_cache
+```
 
 ---
 
@@ -446,13 +489,15 @@ Wall clock often **~2–6s** with flash-lite / network variance (not 15s multi-t
 |------|------------------------|
 | Mock | `MOCK_MODE` |
 | Pilot latency | `PILOT_LOW_LATENCY`, `UTTERANCE_GATE_STRATEGY` |
-| LLM | `LLM_TIER_FAST_MODEL`, `LLM_MAX_TOKENS`, `LLM_TOOL_MAX_TOKENS`, `LLM_REASONING_EFFORT` |
+| LLM | `LLM_TIER_FAST_MODEL`, `LLM_MAX_TOKENS`, `LLM_SHORT_ANSWER_MAX_TOKENS`, `LLM_TOOL_MAX_TOKENS`, `LLM_REASONING_EFFORT` |
 | Multimodal | `MULTIMODAL_SCENE_AUDIO_ENABLED`, `MULTIMODAL_MAX_CLIPS` |
 | Scene audio | `SCENE_AUDIO_ENABLED`, `SCENE_AUDIO_MAX_SEC` |
 | Objects | `OBJECT_STORE_BACKEND` (`local`\|`minio`), `MINIO_ENDPOINT` (often `localhost:19000`) |
 | Diarization | `DIARIZATION_ENABLED`, extras install |
 | Cast | `TMDB_API_KEY`, `TITLE_NAMES` |
 | Cache | `QA_CACHE_*` |
+| Query embed cache | `QUERY_EMBEDDING_CACHE_TTL_SEC`, `QUERY_EMBEDDING_CACHE_MAX` |
+| Evidence trim | `EVIDENCE_MAX_SCENES`, `EVIDENCE_MAX_CHARS_PER_FIELD` |
 | Embeddings | `EMBEDDING_MODEL`, `EMBEDDING_DEVICE` |
 | Broker | `MESSAGE_BROKER` |
 

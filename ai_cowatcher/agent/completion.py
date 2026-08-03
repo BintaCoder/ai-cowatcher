@@ -3,15 +3,38 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import httpx
 import litellm
 
 from ai_cowatcher.agent.token_usage import TokenUsage, usage_from_litellm_response
 from ai_cowatcher.config import Settings
+from ai_cowatcher.observability.ask_latency import AskLatencyTracker
+
+logger = logging.getLogger(__name__)
+
+# Persistent HTTP client so Gemini calls reuse TCP/TLS (not a new handshake each ask).
+_LITELLM_HTTP_CLIENT: httpx.Client | None = None
+
+
+def ensure_litellm_http_pool() -> httpx.Client:
+    """Install a process-wide httpx client for LiteLLM connection reuse."""
+    global _LITELLM_HTTP_CLIENT
+    if _LITELLM_HTTP_CLIENT is None:
+        _LITELLM_HTTP_CLIENT = httpx.Client(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+            http2=False,
+        )
+    # LiteLLM reads client_session when present for OpenAI-compatible HTTP paths.
+    litellm.client_session = _LITELLM_HTTP_CLIENT  # type: ignore[attr-defined]
+    return _LITELLM_HTTP_CLIENT
 
 
 @dataclass
@@ -129,6 +152,7 @@ class CompletionClient(Protocol):
         messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 1024,
+        latency: AskLatencyTracker | None = None,
     ) -> Iterator[str]:
         """Yield text deltas for the final answer (no tool calls)."""
         ...
@@ -139,6 +163,7 @@ class LiteLLMCompletionClient:
 
     def __init__(self, settings: Settings):
         self._settings = settings
+        ensure_litellm_http_pool()
 
     def _common_kwargs(
         self,
@@ -195,7 +220,9 @@ class LiteLLMCompletionClient:
         messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 1024,
+        latency: AskLatencyTracker | None = None,
     ) -> Iterator[str]:
+        """Yield provider deltas immediately (no full-response buffer)."""
         kwargs = self._common_kwargs(
             model=model,
             messages=messages,
@@ -203,7 +230,21 @@ class LiteLLMCompletionClient:
             max_tokens=max_tokens,
         )
         kwargs["stream"] = True
+        if latency is not None:
+            latency.mark_llm_request_sent()
+        t_sent = time.perf_counter()
+        logger.info(
+            json.dumps(
+                {
+                    "event": "llm_stream_request",
+                    "model": model,
+                    "max_tokens": max_tokens,
+                },
+                separators=(",", ":"),
+            )
+        )
         response = litellm.completion(**kwargs)
+        first_token = True
         for chunk in response:
             choices = getattr(chunk, "choices", None) or []
             if not choices:
@@ -213,7 +254,37 @@ class LiteLLMCompletionClient:
                 continue
             text = getattr(delta, "content", None)
             if text:
+                if first_token:
+                    first_token = False
+                    ttft_ms = (time.perf_counter() - t_sent) * 1000.0
+                    if latency is not None:
+                        latency.mark_llm_first_token()
+                    logger.info(
+                        json.dumps(
+                            {
+                                "event": "llm_stream_first_token",
+                                "model": model,
+                                "ttft_ms": round(ttft_ms, 2),
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                # Forward as received — never accumulate the full completion first.
                 yield text
+        total_ms = (time.perf_counter() - t_sent) * 1000.0
+        if latency is not None:
+            latency.mark_llm_stream_complete()
+        logger.info(
+            json.dumps(
+                {
+                    "event": "llm_stream_complete",
+                    "model": model,
+                    "total_ms": round(total_ms, 2),
+                    "had_token": not first_token,
+                },
+                separators=(",", ":"),
+            )
+        )
 
 
 _UNKNOWN_PHRASE = "Not sure yet — nothing's made that clear so far."
@@ -258,12 +329,22 @@ class MockCompletionClient:
         messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 1024,
+        latency: AskLatencyTracker | None = None,
     ) -> Iterator[str]:
         self.models_used.append(model)
         del temperature, max_tokens
+        if latency is not None:
+            latency.mark_llm_request_sent()
         result = self._decide(messages)
         content = (result.content or _UNKNOWN_PHRASE).strip()
-        yield from _chunk_text_for_stream(content)
+        first = True
+        for piece in _chunk_text_for_stream(content):
+            if first and latency is not None:
+                latency.mark_llm_first_token()
+                first = False
+            yield piece
+        if latency is not None:
+            latency.mark_llm_stream_complete()
 
     def _decide(self, messages: list[dict[str, Any]]) -> CompletionResult:
         if _is_merged_intent_request(messages):
@@ -699,4 +780,5 @@ def _mock_usage(messages: list[dict[str, Any]]) -> TokenUsage:
 def build_completion_client(settings: Settings) -> CompletionClient:
     if settings.mock_mode:
         return MockCompletionClient()
+    ensure_litellm_http_pool()
     return LiteLLMCompletionClient(settings)

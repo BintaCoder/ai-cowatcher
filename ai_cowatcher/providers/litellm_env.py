@@ -21,6 +21,14 @@ def configure_litellm_env(settings: Settings) -> None:
     base = (settings.ollama_api_base or "").strip()
     if base:
         os.environ["OLLAMA_API_BASE"] = base
+    # Shared HTTP client for connection reuse across Gemini/LiteLLM calls.
+    if not settings.mock_mode:
+        try:
+            from ai_cowatcher.agent.completion import ensure_litellm_http_pool
+
+            ensure_litellm_http_pool()
+        except Exception:  # noqa: BLE001 — never block app start
+            pass
 
 
 def _set_env_if_missing(name: str, value: str) -> None:
