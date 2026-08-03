@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -16,6 +16,7 @@ from ai_cowatcher.web.streaming import (
     async_iter_file_range,
     guess_video_media_type,
     parse_range_header,
+    resolve_video_file_path,
 )
 
 router = APIRouter(tags=["watch"])
@@ -58,10 +59,17 @@ async def watch_page() -> HTMLResponse:
     return HTMLResponse(_WATCH_HTML.read_text(encoding="utf-8"))
 
 
+@router.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Quiet browser requests; missing favicon is not a pilot failure."""
+    return Response(status_code=204)
+
+
 @router.get("/titles", response_model=list[TitleListItem])
 async def list_titles(session: Session = Depends(get_db_session)) -> list[TitleListItem]:
     repo = SceneEventRepository(session)
-    titles = repo.list_completed_titles()
+    # Pilot UI: hide nav-/demo-web pytest rows and titles with deleted video files.
+    titles = repo.list_completed_titles(exclude_ephemeral=True, require_video_file=True)
     return [
         TitleListItem(
             title_id=title.title_id,
@@ -78,8 +86,8 @@ def _resolve_video_path(title_id: str, session: Session) -> Path:
     if title is None or title.status != "completed":
         raise HTTPException(status_code=404, detail=f"Title not found or not ready: {title_id}")
 
-    path = Path(title.video_path).expanduser()
-    if not path.is_file():
+    path = resolve_video_file_path(title.video_path)
+    if path is None:
         raise HTTPException(
             status_code=404,
             detail=f"Video file missing on disk for title {title_id}",

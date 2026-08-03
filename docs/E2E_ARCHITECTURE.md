@@ -291,7 +291,7 @@ Unchanged principle: single agent tools, not a second agent. Offline LangGraph â
 
 | Provider | Usage |
 |----------|--------|
-| **Google Gemini** (default hot path) | Conversation + **multimodal audio** answers (`gemini/gemini-2.0-flash`); optional vision captions |
+| **Google Gemini** (default hot path) | Conversation + **multimodal audio** answers (`gemini/gemini-3.6-flash`); optional vision captions |
 | **OpenAI** | Optional vision / alternate chat models via LiteLLM |
 | **TMDB** | Cast lookup |
 | **Browser STT/TTS** | Client-side listen + speak |
@@ -370,7 +370,7 @@ user_conversation_turns (+ Redis cache)
 | Area | Key env vars |
 |------|----------------|
 | Mock | `MOCK_MODE` |
-| Conversation LLM | `LLM_TIER_FAST_MODEL`, `LLM_TIER_ESCALATED_MODEL` (default `gemini/gemini-2.0-flash`) |
+| Conversation LLM | `LLM_TIER_FAST_MODEL`, `LLM_TIER_ESCALATED_MODEL` (default `gemini/gemini-3.6-flash`) |
 | Multimodal | `MULTIMODAL_SCENE_AUDIO_ENABLED`, `MULTIMODAL_MAX_CLIPS` |
 | Scene audio | `SCENE_AUDIO_ENABLED`, `SCENE_AUDIO_MAX_SEC` |
 | Object store | `OBJECT_STORE_BACKEND` (`local`\|`minio`), `OBJECT_STORE_LOCAL_DIR`, `MINIO_*` |

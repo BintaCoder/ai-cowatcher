@@ -172,7 +172,7 @@
     <header>
       <div>
         <h1>Co-watcher</h1>
-        <div class="subtitle">Talk while you watch — co-watcher listens and answers briefly</div>
+        <div class="subtitle">Say <strong>Hey</strong> then your question — co-watcher answers briefly</div>
       </div>
       <div class="controls">
         <label for="titleSelect">Title</label>
@@ -185,7 +185,7 @@
     <section class="panel">
       <video id="player" controls playsinline preload="metadata"></video>
       <div class="toolbar">
-        <span id="listenBadge" class="" title="Mic listens continuously while a title is loaded">
+        <span id="listenBadge" class="" title="Mic awaits the wake word Hey, then your question">
           <span class="dot" aria-hidden="true"></span>
           <span id="listenBadgeText">Mic idle</span>
         </span>
@@ -195,16 +195,14 @@
         </label>
       </div>
       <div class="toolbar">
-        <input id="questionInput" type="text" placeholder="Or type: “what just happened?” · “joke” · “go to 10:00”" autocomplete="off" />
+        <input id="questionInput" type="text" placeholder="Voice: “Hey, who’s that?” · or type here" autocomplete="off" />
         <button id="sendBtn" type="button" disabled>Ask</button>
       </div>
       <p class="hint">
-        Play any title — the mic stays open. Speak naturally about the show
-        (<strong>who’s that?</strong> · <strong>what just happened?</strong> · <strong>joke</strong> · <strong>go to 10:00</strong>).
-        Filler and movie-bleed noise are ignored; headphones help. While you talk (and during the answer),
-        video volume ducks smoothly when that option is on — like conversation awareness.
-        Mic uses short sessions (keeps the tab lighter).
-        Typing still works if speech is unavailable.
+        Voice needs the wake word <strong>Hey</strong> first, then the question in the same phrase
+        (e.g. <strong>Hey, who’s that?</strong> · <strong>Hey what just happened?</strong> · <strong>Hey, go to 10:00</strong>).
+        Program audio is ignored unless it contains “Hey”. Typing does <em>not</em> need the wake word.
+        Duck volume lowers the show while you talk / get an answer; headphones still help.
       </p>
       <div id="status" class="status">Pick a title to start.</div>
     </section>
@@ -246,9 +244,15 @@
     const MAX_STARTS_PER_MIN = 25;
     /** Volume duck while user talks / ask / TTS (conversation-awareness style). */
     const DUCK_FRACTION = 0.2;
+    /** Milder program volume while mic is open so show dialogue is less likely to trigger STT. */
+    const AMBIENT_DUCK_FRACTION = 0.48;
     const DUCK_MIN = 0.08;
     const VOLUME_FADE_MS = 280;
     const SPEECH_UNDUCK_DELAY_MS = 450;
+    /** After quieting program audio, re-open mic once volume has settled. */
+    const PROGRAM_BLEED_RESTART_MS = 480;
+    /** Treat STT as "user" only after program was quieted (or show is not audible). */
+    const USER_LISTEN_WINDOW_MS = 6000;
 
     const NAV_INTENT_RE = /\b(go to|jump to|skip to|take me to|show me|find|where does|where is|when does|rewind|fast[\s-]?forward|seek)\b/i;
     const JOKE_INTENT_RE = /\b(tell me a joke|got a (?:good )?joke|make me laugh|say something funny|one[\s-]?liner|be funny|any jokes?|jokes?)\b/i;
@@ -256,6 +260,22 @@
     const CLOCK_RE = /\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b/;
     const DURATION_RE = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi;
     const FILLER_ONLY_RE = /^(um+|uh+|uhm+|erm+|hmm+|mm+|mhm+|ah+|oh+|huh+|yeah|yep|ok|okay|so|like|well)\.?$/i;
+    /** Wake word — only phrases with this become voice questions (typed path skips it). */
+    const WAKE_WORD_RE = /\b(?:hey|hay)\b(?:\s+(?:co[- ]?watcher|cowatcher|there))?\b/i;
+
+    /**
+     * @returns {null | { wakeOnly: true } | { question: string }}
+     * null = no wake word (ignore as program / noise)
+     */
+    function parseWakeUtterance(raw) {
+      const text = (raw || "").replace(/\s+/g, " ").trim();
+      if (!text) return null;
+      const match = text.match(WAKE_WORD_RE);
+      if (!match) return null;
+      const after = text.slice(match.index + match[0].length).replace(/^[\s,.\-–—:;!?]+/, "").trim();
+      if (!after) return { wakeOnly: true };
+      return { question: after };
+    }
 
     function isNavigationQuestion(question) {
       if (JOKE_INTENT_RE.test(question)) return false;
@@ -348,14 +368,36 @@
     let activeSpeaker = null;
 
     // Conversation-awareness volume duck ----------
+    // Note: browser SpeechRecognition cannot true AEC (echo-cancel) HTML <video> audio.
+    // We quiet the program when listening / when the mic first hears *anything*, then only
+    // treat later speech as the user. TTS already mutes the mic while the app speaks.
     let baseVolume = Math.min(1, Math.max(0.05, player.volume || 1));
-    let duckReasons = new Set(); // "speech" | "ask" | "tts"
+    let duckReasons = new Set(); // "ambient" | "speech" | "ask" | "tts"
     let volumeFadeRaf = null;
     let speechUnduckTimer = null;
     let ignoringVolumeChange = false;
+    /** After we quiet program audio, allow user STT for a short window. */
+    let userListenUntilMs = 0;
+    let quietingProgram = false;
 
     function duckEnabled() {
       return !duckWhileTalking || duckWhileTalking.checked;
+    }
+
+    function programIsAudible() {
+      if (!player) return false;
+      if (player.paused || player.ended || player.muted) return false;
+      if ((player.volume || 0) <= 0.04) return false;
+      // readyState HAVE_CURRENT_DATA+
+      return (player.readyState || 0) >= 2;
+    }
+
+    function userListenArmed() {
+      return Date.now() < userListenUntilMs;
+    }
+
+    function armUserListenWindow(ms = USER_LISTEN_WINDOW_MS) {
+      userListenUntilMs = Date.now() + ms;
     }
 
     function captureBaseVolume() {
@@ -367,7 +409,16 @@
     }
 
     function duckedTargetVolume() {
-      return Math.max(DUCK_MIN, Math.min(baseVolume, baseVolume * DUCK_FRACTION));
+      // Strongest active duck wins (lowest volume target).
+      let fraction = 1;
+      if (duckReasons.has("ask") || duckReasons.has("tts") || duckReasons.has("speech")) {
+        fraction = Math.min(fraction, DUCK_FRACTION);
+      }
+      if (duckReasons.has("ambient")) {
+        fraction = Math.min(fraction, AMBIENT_DUCK_FRACTION);
+      }
+      if (fraction >= 1) return baseVolume;
+      return Math.max(DUCK_MIN, Math.min(baseVolume, baseVolume * fraction));
     }
 
     function fadePlayerVolume(target, durationMs = VOLUME_FADE_MS) {
@@ -432,22 +483,88 @@
         speechUnduckTimer = setTimeout(() => {
           speechUnduckTimer = null;
           if (duckReasons.size === 0) fadePlayerVolume(baseVolume);
+          else fadePlayerVolume(duckedTargetVolume());
         }, SPEECH_UNDUCK_DELAY_MS);
         return;
       }
       syncDuckVolume();
     }
 
+    function shouldAmbientDuck() {
+      return (
+        duckEnabled()
+        && listenDesired
+        && Boolean(titleSelect.value)
+        && !askInFlight
+        && !ttsSpeaking
+        && !document.hidden
+        && programIsAudible()
+      );
+    }
+
+    function syncAmbientDuck() {
+      if (shouldAmbientDuck()) {
+        setDuckReason("ambient", true);
+      } else {
+        setDuckReason("ambient", false);
+      }
+    }
+
+    /**
+     * Mic often hears speaker → "You're talking" from the show.
+     * Quiet the program and drop this STT round; next round is treated as the viewer.
+     */
+    function suppressProgramBleedAndRelisten() {
+      if (quietingProgram || askInFlight || ttsSpeaking) return;
+      quietingProgram = true;
+      sessionTranscript = "";
+      sessionConfidence = 0;
+      setDuckReason("speech", true);
+      armUserListenWindow();
+      updateListenBadge("on", "Quieting program…");
+      setStatus("Program audio quieted — say your question now.", "ok");
+      // Tear down STT without submitting the show's dialogue.
+      if (recognition) {
+        const rec = recognition;
+        rec.onresult = null;
+        rec.onspeechstart = null;
+        rec.onspeechend = null;
+        rec.onend = () => {
+          listening = false;
+          quietingProgram = false;
+          scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+        };
+        try { rec.abort(); } catch (_) {
+          try { rec.stop(); } catch (_) {}
+          quietingProgram = false;
+          scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+        }
+      } else {
+        quietingProgram = false;
+        scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+      }
+    }
+
     player.addEventListener("volumechange", () => {
       if (ignoringVolumeChange || duckReasons.size > 0) return;
       captureBaseVolume();
+    });
+    player.addEventListener("play", () => syncAmbientDuck());
+    player.addEventListener("playing", () => syncAmbientDuck());
+    player.addEventListener("pause", () => syncAmbientDuck());
+    player.addEventListener("ended", () => syncAmbientDuck());
+    player.addEventListener("volumechange", () => {
+      if (!ignoringVolumeChange) syncAmbientDuck();
     });
 
     if (duckWhileTalking) {
       duckWhileTalking.addEventListener("change", () => {
         if (!duckWhileTalking.checked) {
           duckReasons.clear();
+          userListenUntilMs = 0;
           fadePlayerVolume(baseVolume);
+        } else {
+          syncAmbientDuck();
         }
       });
     }
@@ -516,7 +633,7 @@
         clearTimeout(restartListenTimer);
         restartListenTimer = null;
       }
-      setDuckReason("speech", false);
+      if (!quietingProgram) setDuckReason("speech", false);
       if (!recognition) {
         listening = false;
         return;
@@ -568,23 +685,23 @@
         listening = true;
         sessionTranscript = "";
         sessionConfidence = 0;
-        updateListenBadge("on", "Listening…");
+        // Mild ambient duck only — full duck waits for the wake word.
+        syncAmbientDuck();
+        updateListenBadge("on", "Say Hey…");
         if (!askInFlight && !ttsSpeaking) {
-          setStatus("Listening while you watch — just talk.", "ok");
+          setStatus('Listening for “Hey…”, then your question (e.g. Hey, who’s that?).', "ok");
         }
       };
 
-      // Best-effort speech edge events (Chrome); volume ducks as soon as talk begins.
+      // Don't treat any sound as the user — wait for wake word in results.
       rec.onspeechstart = () => {
         if (askInFlight || ttsSpeaking) return;
-        setDuckReason("speech", true);
-        updateListenBadge("on", "You're talking…");
+        updateListenBadge("on", "Say Hey…");
       };
 
       rec.onspeechend = () => {
-        // Keep duck if ask is about to fire; release speech reason after delay otherwise.
-        if (!askInFlight && !ttsSpeaking) {
-          setDuckReason("speech", false);
+        if (!askInFlight && !ttsSpeaking && !duckReasons.has("speech")) {
+          syncAmbientDuck();
         }
       };
 
@@ -596,8 +713,6 @@
           const alt = result[0];
           const text = (alt.transcript || "").trim();
           if (!text) continue;
-          // Backup duck trigger when onspeechstart is missing (Safari / some engines).
-          setDuckReason("speech", true);
           if (result.isFinal) {
             sessionTranscript = `${sessionTranscript} ${text}`.trim();
             if (typeof alt.confidence === "number" && alt.confidence > 0) {
@@ -608,16 +723,31 @@
           }
         }
         const preview = (sessionTranscript || interim || "").trim();
-        if (preview) {
-          questionText.textContent = preview;
-          updateListenBadge("on", "Heard you…");
+        const parsed = parseWakeUtterance(preview);
+        if (!parsed) {
+          // Program / room noise without wake word — stay idle for voice questions.
+          updateListenBadge("on", "Say Hey…");
+          return;
         }
+        setDuckReason("speech", true);
+        if (parsed.wakeOnly) {
+          questionText.textContent = "Hey…";
+          updateListenBadge("on", "Heard Hey…");
+          setStatus("Hey heard — add your question (Hey, what just happened?).", "ok");
+          return;
+        }
+        questionText.textContent = parsed.question;
+        updateListenBadge("on", "You're talking…");
       };
 
       rec.onerror = (event) => {
         listening = false;
+        if (quietingProgram) {
+          if (event.error === "aborted" || event.error === "no-speech") return;
+          quietingProgram = false;
+        }
         setDuckReason("speech", false);
-        // Do NOT rapid-restart on no-speech — that pattern leaks in Chromium.
+        syncAmbientDuck();
         if (event.error === "no-speech" || event.error === "aborted") {
           scheduleListenRestart(LISTEN_COOLDOWN_MS);
           return;
@@ -634,19 +764,43 @@
 
       rec.onend = () => {
         listening = false;
-        const question = sessionTranscript.trim();
+        if (quietingProgram) {
+          quietingProgram = false;
+          sessionTranscript = "";
+          sessionConfidence = 0;
+          scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+          return;
+        }
+        const raw = sessionTranscript.trim();
         const conf = sessionConfidence;
         sessionTranscript = "";
         sessionConfidence = 0;
 
-        if (question && !askInFlight && !ttsSpeaking) {
-          // Hand off duck from "speech" → "ask" so volume stays low through thinking.
+        const parsed = parseWakeUtterance(raw);
+        if (!parsed) {
+          // No wake word — ignore (typical program audio).
+          setDuckReason("speech", false);
+          syncAmbientDuck();
+          if (shouldBeListening()) scheduleListenRestart(LISTEN_COOLDOWN_MS);
+          else updateListenBadge("off", "Mic idle");
+          return;
+        }
+        if (parsed.wakeOnly) {
+          setDuckReason("speech", false);
+          syncAmbientDuck();
+          setStatus('Say more after Hey — e.g. “Hey, who’s that?”', "ok");
+          if (shouldBeListening()) scheduleListenRestart(LISTEN_COOLDOWN_MS);
+          return;
+        }
+
+        if (!askInFlight && !ttsSpeaking) {
           setDuckReason("ask", true);
           setDuckReason("speech", false);
-          void handleHeardSpeech(question, conf);
+          void handleHeardSpeech(parsed.question, conf);
           return;
         }
         setDuckReason("speech", false);
+        syncAmbientDuck();
         if (shouldBeListening()) {
           scheduleListenRestart(LISTEN_COOLDOWN_MS);
         } else if (ttsSpeaking) {
@@ -682,12 +836,12 @@
         return;
       }
       if (listening) {
-        updateListenBadge("on", "Listening…");
+        updateListenBadge("on", "Say Hey…");
         return;
       }
       if (!allowStartNow()) {
         scheduleListenRestart(LISTEN_COOLDOWN_MS);
-        updateListenBadge("on", "Listening… (cool-down)");
+        updateListenBadge("on", "Say Hey… (cool-down)");
         return;
       }
       const rec = ensureRecognition();
@@ -798,7 +952,7 @@
       let buffer = "";
       let answer = "";
       let donePayload = null;
-      const readyMsg = "Listening while you watch — just talk.";
+      const readyMsg = 'Listening for “Hey…”, then your question.';
       answerText.textContent = "";
       let unlocked = false;
 
@@ -892,11 +1046,11 @@
         applySeek(data.seek_to_ts);
         releaseControls();
         setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
-        speakOnce(data.answer, "Listening while you watch — just talk.");
+        speakOnce(data.answer, 'Listening for “Hey…”, then your question.');
         return;
       }
       releaseControls();
-      speakOnce(data.answer, "Listening while you watch — just talk.");
+      speakOnce(data.answer, 'Listening for “Hey…”, then your question.');
     }
 
     async function submitQuestion(question) {
@@ -984,13 +1138,18 @@
         return;
       }
       listenDesired = true;
+      syncAmbientDuck();
       ensureListening();
     }
 
     function disableAmbientMic() {
       listenDesired = false;
       sessionTranscript = "";
+      userListenUntilMs = 0;
+      quietingProgram = false;
       disposeRecognition();
+      setDuckReason("ambient", false);
+      setDuckReason("speech", false);
       updateListenBadge("off", "Mic idle");
     }
 
@@ -1045,7 +1204,7 @@
       enableAmbientMic();
       setStatus(
         speechSupported()
-          ? `Loaded ${titleId}. Play and talk — co-watcher is listening.`
+          ? `Loaded ${titleId}. Play, then say “Hey…” + your question.`
           : `Loaded ${titleId}. Type questions below.`,
         "ok"
       );

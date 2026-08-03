@@ -153,10 +153,19 @@ class PyannoteDiarizer:
 
     Loaded lazily because it pulls in torch. Requires a Hugging Face access
     token with access to the gated diarization model.
+    Install with: ``pip install 'ai-cowatcher[diarization]'`` (or ``.[diarization]``).
     """
 
     def __init__(self, settings: Settings):
-        from pyannote.audio import Pipeline
+        try:
+            from pyannote.audio import Pipeline
+        except ImportError as exc:
+            raise ImportError(
+                "pyannote.audio is not installed. Ingest can run without it "
+                "(speaker clusters empty). To enable diarization: "
+                "pip install '.[diarization]' and set HUGGINGFACE_TOKEN for the "
+                "gated model."
+            ) from exc
 
         token = settings.huggingface_token or None
         logger.info("Loading pyannote diarization pipeline=%s", settings.diarization_model)
@@ -178,6 +187,14 @@ class PyannoteDiarizer:
             )
         segments.sort(key=lambda seg: (seg.start_ts, seg.end_ts))
         return segments
+
+
+class NoOpSpeakerDiarizer:
+    """Skip speaker diarization (no pyannote / disabled in config)."""
+
+    def diarize(self, audio_path: str) -> list[SpeakerSegment]:
+        del audio_path
+        return []
 
 
 class InsightFaceAnalyzer:

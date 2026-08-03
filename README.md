@@ -57,9 +57,21 @@ Alert thresholds: [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 ## CLI
 
+Always use the project venv (or `make`), so `ai_cowatcher` resolves:
+
 ```bash
-cowatcher-ingest --title-id demo --video /path/to/video.mp4   # direct (no broker)
-cowatcher-ingest-worker                                       # consume broker events
+source .venv/bin/activate
+pip install -e ".[dev]"   # if you see: No module named 'ai_cowatcher'
+
+# Preferred (works even if console scripts are stale):
+python -m ai_cowatcher.ingestion.cli --title-id demo --video /path/to/video.mp4 --force
+
+# Or:
+make ingest TITLE=demo VIDEO=/path/to/video.mp4 FORCE=1
+
+# After install, these also work:
+cowatcher-ingest --title-id demo --video /path/to/video.mp4
+cowatcher-ingest-worker
 make worker
 cowatcher-metrics-lite < ask.log
 ```

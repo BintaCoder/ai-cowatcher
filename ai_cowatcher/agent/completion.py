@@ -19,6 +19,8 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    # Gemini 3+ requires thought_signature on functionCall parts in follow-up turns.
+    thought_signature: str | None = None
 
 
 @dataclass
@@ -26,6 +28,86 @@ class CompletionResult:
     content: str | None
     tool_calls: list[ToolCall]
     usage: TokenUsage | None = None
+
+
+# Google-recommended dummy so multi-turn tools work when a signature was stripped/missing
+# https://ai.google.dev/gemini-api/docs/thought-signatures
+_GEMINI_SKIP_THOUGHT_SIGNATURE = "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
+
+
+def _extract_thought_signature(call: Any) -> str | None:
+    """Pull thought_signature from LiteLLM / OpenAI-shaped tool_call objects."""
+    psf = getattr(call, "provider_specific_fields", None)
+    if isinstance(psf, dict):
+        sig = psf.get("thought_signature") or psf.get("thoughtSignature")
+        if sig:
+            return str(sig)
+    # dict-shaped (already normalized)
+    if isinstance(call, dict):
+        psf = call.get("provider_specific_fields") or {}
+        if isinstance(psf, dict):
+            sig = psf.get("thought_signature") or psf.get("thoughtSignature")
+            if sig:
+                return str(sig)
+        extra = call.get("extra_content") or call.get("extra_body")
+        if isinstance(extra, dict):
+            google = extra.get("google") or extra.get("vertex") or {}
+            if isinstance(google, dict) and google.get("thought_signature"):
+                return str(google["thought_signature"])
+    # nested model_extra
+    model_extra = getattr(call, "model_extra", None) or {}
+    if isinstance(model_extra, dict):
+        psf = model_extra.get("provider_specific_fields")
+        if isinstance(psf, dict) and psf.get("thought_signature"):
+            return str(psf["thought_signature"])
+    return None
+
+
+def _parse_tool_calls(message: Any) -> list[ToolCall]:
+    raw_calls = getattr(message, "tool_calls", None) or []
+    parsed: list[ToolCall] = []
+    for index, call in enumerate(raw_calls):
+        function = call.function
+        arguments_raw = function.arguments or "{}"
+        try:
+            arguments = json.loads(arguments_raw)
+        except json.JSONDecodeError:
+            arguments = {}
+        parsed.append(
+            ToolCall(
+                id=call.id or f"call_{index}",
+                name=function.name,
+                arguments=arguments,
+                thought_signature=_extract_thought_signature(call),
+            )
+        )
+    return parsed
+
+
+def assistant_tool_calls_message(result: CompletionResult) -> dict[str, Any]:
+    """Build the assistant message for multi-turn tool loops (Gemini-safe)."""
+    tool_calls: list[dict[str, Any]] = []
+    for index, tool_call in enumerate(result.tool_calls):
+        # First tool call in a parallel set must carry a signature for Gemini 3.
+        sig = tool_call.thought_signature
+        if index == 0 and not sig:
+            sig = _GEMINI_SKIP_THOUGHT_SIGNATURE
+        entry: dict[str, Any] = {
+            "id": tool_call.id,
+            "type": "function",
+            "function": {
+                "name": tool_call.name,
+                "arguments": json.dumps(tool_call.arguments),
+            },
+        }
+        if sig:
+            entry["provider_specific_fields"] = {"thought_signature": sig}
+        tool_calls.append(entry)
+    return {
+        "role": "assistant",
+        "content": result.content,
+        "tool_calls": tool_calls,
+    }
 
 
 class CompletionClient(Protocol):
@@ -52,31 +134,32 @@ class CompletionClient(Protocol):
         ...
 
 
-def _parse_tool_calls(message: Any) -> list[ToolCall]:
-    raw_calls = getattr(message, "tool_calls", None) or []
-    parsed: list[ToolCall] = []
-    for index, call in enumerate(raw_calls):
-        function = call.function
-        arguments_raw = function.arguments or "{}"
-        try:
-            arguments = json.loads(arguments_raw)
-        except json.JSONDecodeError:
-            arguments = {}
-        parsed.append(
-            ToolCall(
-                id=call.id or f"call_{index}",
-                name=function.name,
-                arguments=arguments,
-            )
-        )
-    return parsed
-
-
 class LiteLLMCompletionClient:
     """Routes conversation completions through LiteLLM."""
 
     def __init__(self, settings: Settings):
         self._settings = settings
+
+    def _common_kwargs(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        # Gemini 3 burns max_tokens on reasoning first; low effort + higher budget
+        # leaves room for the spoken answer (short co-watch replies).
+        effort = (getattr(self._settings, "llm_reasoning_effort", None) or "").strip()
+        if effort and effort.lower() not in ("", "off", "default"):
+            kwargs["reasoning_effort"] = effort
+        return kwargs
 
     def complete(
         self,
@@ -87,12 +170,12 @@ class LiteLLMCompletionClient:
         temperature: float = 0.2,
         max_tokens: int = 1024,
     ) -> CompletionResult:
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
+        kwargs = self._common_kwargs(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -113,13 +196,14 @@ class LiteLLMCompletionClient:
         temperature: float = 0.2,
         max_tokens: int = 1024,
     ) -> Iterator[str]:
-        response = litellm.completion(
+        kwargs = self._common_kwargs(
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            stream=True,
         )
+        kwargs["stream"] = True
+        response = litellm.completion(**kwargs)
         for chunk in response:
             choices = getattr(chunk, "choices", None) or []
             if not choices:

@@ -11,6 +11,7 @@ from typing import Any
 from ai_cowatcher.agent.brevity import enforce_brief_answer
 from ai_cowatcher.agent.completion import (
     CompletionClient,
+    assistant_tool_calls_message,
     build_completion_client,
     _chunk_text_for_stream,
 )
@@ -153,6 +154,9 @@ class ConversationAgent:
         return tools
 
     def _use_merged_intent(self) -> bool:
+        # Pilot low-latency always uses merged (1 retrieve + 1 LLM), never multi-tool hops.
+        if getattr(self._settings, "pilot_low_latency", False):
+            return True
         return (
             bool(getattr(self._settings, "utterance_gate_enabled", True))
             and getattr(self._settings, "utterance_gate_strategy", "merged") == "merged"
@@ -445,21 +449,26 @@ class ConversationAgent:
 
         tag = parsed.tag
         body = parsed.body
+        # If multimodal preferred for CONTENT, only run it when text body is weak.
         if tag == "CONTENT" and payloads:
-            mm = self._try_multimodal_answer(
-                question=question,
-                tool_payloads=payloads,
-                model=model,
-            )
-            if mm is not None:
-                mm_text, mm_usage = mm
-                if mm_usage is not None:
-                    usage = usage.merge(mm_usage)
-                body = mm_text
-                used_context = True
-                reason_suffix = "+multimodal"
-            else:
+            body_ok = bool((body or "").strip()) and not is_refusal_answer(body or "")
+            if body_ok:
                 reason_suffix = ""
+            else:
+                mm = self._try_multimodal_answer(
+                    question=question,
+                    tool_payloads=payloads,
+                    model=model,
+                )
+                if mm is not None:
+                    mm_text, mm_usage = mm
+                    if mm_usage is not None:
+                        usage = usage.merge(mm_usage)
+                    body = mm_text
+                    used_context = True
+                    reason_suffix = "+multimodal"
+                else:
+                    reason_suffix = ""
         else:
             reason_suffix = ""
 
@@ -520,8 +529,15 @@ class ConversationAgent:
         body_parts: list[str] = []
         emit_tokens = True  # set False for FILLER / NAVIGATE after tag
 
-        # Prefer multimodal full answer for content when clips are available
-        if payloads and should_use_multimodal(self._settings) and self._object_store:
+        # Prefer multimodal only when it won't stack on a text-only path already good
+        # enough; streaming wants tokens ASAP (merged path). Full multimodal still for empty clips path.
+        prefer_mm = (
+            payloads
+            and should_use_multimodal(self._settings)
+            and self._object_store
+            and getattr(self._settings, "multimodal_prefer_over_text", False)
+        )
+        if prefer_mm:
             mm = self._try_multimodal_answer(
                 question=question,
                 tool_payloads=payloads,
@@ -690,7 +706,10 @@ class ConversationAgent:
         model: str,
         joke_mode: bool = False,
     ) -> tuple[str, bool, TokenUsage | None]:
-        if not joke_mode:
+        raw_text = (raw or "").strip()
+        # Multimodal is a second Gemini call (+ clip I/O). Only use it when text tools
+        # did not already produce a usable answer — pilot latency otherwise multiplies.
+        if not joke_mode and (not raw_text or is_refusal_answer(raw_text)):
             mm = self._try_multimodal_answer(
                 question=question,
                 tool_payloads=tool_payloads,
@@ -960,7 +979,7 @@ class ConversationAgent:
                     yield AskStreamEvent(type="token", text=piece)
                 return answer_text, usage, used_context
 
-            messages.append(self._assistant_tool_calls_message(result))
+            messages.append(assistant_tool_calls_message(result))
             for tool_call in result.tool_calls:
                 status = _TOOL_STATUS.get(tool_call.name, f"Running {tool_call.name}…")
                 yield AskStreamEvent(type="status", message=status)
@@ -1066,7 +1085,7 @@ class ConversationAgent:
                     usage = usage.merge(mm_usage)
                 return text, usage, used_context
 
-            messages.append(self._assistant_tool_calls_message(result))
+            messages.append(assistant_tool_calls_message(result))
             for tool_call in result.tool_calls:
                 payload, hit_context = self._dispatch_tool(
                     tool_call,
@@ -1131,24 +1150,6 @@ class ConversationAgent:
                 messages.append({"role": "system", "content": hint})
         messages.append({"role": "user", "content": question})
         return messages
-
-    @staticmethod
-    def _assistant_tool_calls_message(result) -> dict[str, Any]:
-        return {
-            "role": "assistant",
-            "content": result.content,
-            "tool_calls": [
-                {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.name,
-                        "arguments": json.dumps(tool_call.arguments),
-                    },
-                }
-                for tool_call in result.tool_calls
-            ],
-        }
 
     @staticmethod
     def _cast_title_hint(

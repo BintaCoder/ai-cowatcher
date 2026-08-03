@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     neo4j_database: str = Field(default="neo4j", alias="NEO4J_DATABASE")
 
     # ── MinIO ─────────────────────────────────────────────────────────────────
-    minio_endpoint: str = Field(default="localhost:9000", alias="MINIO_ENDPOINT")
+    minio_endpoint: str = Field(default="localhost:19000", alias="MINIO_ENDPOINT")
     minio_access_key: str = Field(default="minioadmin", alias="MINIO_ACCESS_KEY")
     minio_secret_key: str = Field(default="minioadmin", alias="MINIO_SECRET_KEY")
     minio_bucket: str = Field(default="cowatcher", alias="MINIO_BUCKET")
@@ -99,10 +99,12 @@ class Settings(BaseSettings):
     scene_audio_enabled: bool = Field(default=True, alias="SCENE_AUDIO_ENABLED")
     # Attach retrieved clips to the conversation answer model
     multimodal_scene_audio_enabled: bool = Field(
-        default=True,
+        default=False,  # off for pilot latency — text scenes usually enough
         alias="MULTIMODAL_SCENE_AUDIO_ENABLED",
     )
     multimodal_max_clips: int = Field(default=2, alias="MULTIMODAL_MAX_CLIPS")
+    # Pilot: minimize tool hops / model reasoning / multimodal
+    pilot_low_latency: bool = Field(default=True, alias="PILOT_LOW_LATENCY")
 
     # ── FFmpeg (subprocess) ───────────────────────────────────────────────────
     ffmpeg_bin: str = Field(default="ffmpeg", alias="FFMPEG_BIN")
@@ -118,6 +120,9 @@ class Settings(BaseSettings):
     insightface_ctx_id: int = Field(default=-1, alias="INSIGHTFACE_CTX_ID")
 
     # ── Speaker diarization (pyannote.audio) ──────────────────────────────────
+    # Optional: install with `pip install '.[diarization]'` and set HUGGINGFACE_TOKEN.
+    # If the package is missing, ingest continues with empty speaker clusters.
+    diarization_enabled: bool = Field(default=True, alias="DIARIZATION_ENABLED")
     diarization_model: str = Field(
         default="pyannote/speaker-diarization-3.1", alias="DIARIZATION_MODEL"
     )
@@ -132,27 +137,27 @@ class Settings(BaseSettings):
     embedding_device: str = Field(default="cpu", alias="EMBEDDING_DEVICE")
 
     # ── Vision captioning (LiteLLM) ───────────────────────────────────────────
-    vision_model: str = Field(default="gemini/gemini-2.0-flash-lite", alias="VISION_MODEL")
+    vision_model: str = Field(default="gemini/gemini-3.5-flash-lite", alias="VISION_MODEL")
     vision_max_tokens: int = Field(default=256, alias="VISION_MAX_TOKENS")
     vision_caption_delay_sec: float = Field(default=1.0, alias="VISION_CAPTION_DELAY_SEC")
     vision_caption_max_retries: int = Field(default=8, alias="VISION_CAPTION_MAX_RETRIES")
     vision_frame_max_size: int = Field(default=512, alias="VISION_FRAME_MAX_SIZE")
 
     # ── Conversation LLM (LiteLLM) ────────────────────────────────────────────
-    llm_primary_model: str = Field(default="gemini/gemini-2.0-flash", alias="LLM_PRIMARY_MODEL")
+    llm_primary_model: str = Field(default="gemini/gemini-3.6-flash", alias="LLM_PRIMARY_MODEL")
     llm_fallback_model: str = Field(
-        default="gemini/gemini-2.0-flash",
+        default="gemini/gemini-3.6-flash",
         alias="LLM_FALLBACK_MODEL",
     )
     llm_mock_model: str = Field(default="mock-llm", alias="LLM_MOCK_MODEL")
     # Prefer online multimodal-capable models for co-watch answers (audio+text).
     # Override to ollama/* only if you accept text-only fall back when clips need mm.
     llm_tier_fast_model: str = Field(
-        default="gemini/gemini-2.0-flash",
+        default="gemini/gemini-3.6-flash",
         alias="LLM_TIER_FAST_MODEL",
     )
     llm_tier_escalated_model: str = Field(
-        default="gemini/gemini-2.0-flash",
+        default="gemini/gemini-3.6-flash",
         alias="LLM_TIER_ESCALATED_MODEL",
     )
     llm_mock_tier_fast_model: str = Field(
@@ -172,15 +177,16 @@ class Settings(BaseSettings):
         default="why,how,explain,compare,motivation,relationship,theme,symbolism,foreshadow",
         alias="LLM_ESCALATION_KEYWORDS",
     )
-    llm_max_tokens: int = Field(default=96, alias="LLM_MAX_TOKENS")
-    # Tool-call JSON needs more headroom than spoken answer size.
-    llm_tool_max_tokens: int = Field(default=384, alias="LLM_TOOL_MAX_TOKENS")
+    llm_max_tokens: int = Field(default=512, alias="LLM_MAX_TOKENS")
+    # Tool-call JSON + multi-step needs more headroom than spoken answer size.
+    llm_tool_max_tokens: int = Field(default=768, alias="LLM_TOOL_MAX_TOKENS")
     llm_temperature: float = Field(default=0.35, alias="LLM_TEMPERATURE")
+    # LiteLLM/Gemini 3: lower thinking so max_tokens isn't all reasoning.
+    llm_reasoning_effort: str = Field(default="minimal", alias="LLM_REASONING_EFFORT")
     ollama_api_base: str = Field(
         default="http://localhost:11434",
         alias="OLLAMA_API_BASE",
     )
-
     # ── Utterance gate (mic / typed noise + intents) ──────────────────────────
     utterance_gate_enabled: bool = Field(default=True, alias="UTTERANCE_GATE_ENABLED")
     # heuristic = rules only
