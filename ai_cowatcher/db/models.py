@@ -108,3 +108,30 @@ class UserConversationTurn(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class BenchAskResult(Base):
+    """One /ask sample from cowatcher-bench-ask (Grafana Postgres datasource)."""
+
+    __tablename__ = "bench_ask_result"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    title_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    question_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    current_ts: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    answer: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=-1.0)
+    # exact | semantic | miss | none — low cardinality for Prom/Grafana
+    cache_source: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    model_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    model_tier: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    used_context: Mapped[bool | None] = mapped_column(nullable=True)
+    skip_memory: Mapped[bool | None] = mapped_column(nullable=True)
+    kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )

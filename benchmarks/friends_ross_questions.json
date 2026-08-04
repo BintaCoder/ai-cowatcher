@@ -1,0 +1,102 @@
+[
+  {
+    "id": "q01",
+    "text": "Who is that guy talking right now?",
+    "kind": "playhead"
+  },
+  {
+    "id": "q02",
+    "text": "What's going on in this scene?",
+    "kind": "playhead"
+  },
+  {
+    "id": "q03",
+    "text": "What just happened?",
+    "kind": "playhead"
+  },
+  {
+    "id": "q04",
+    "text": "Why does he look so upset?",
+    "kind": "plot"
+  },
+  {
+    "id": "q05",
+    "text": "Who is Ross supposed to be into?",
+    "kind": "plot"
+  },
+  {
+    "id": "q06",
+    "text": "Is this before or after the divorce?",
+    "kind": "plot"
+  },
+  {
+    "id": "q07",
+    "text": "What did Chandler just say?",
+    "kind": "playhead"
+  },
+  {
+    "id": "q08",
+    "text": "Make a joke about this awkward silence",
+    "kind": "joke"
+  },
+  {
+    "id": "q09",
+    "text": "Can you roast Ross for a second?",
+    "kind": "joke"
+  },
+  {
+    "id": "q10",
+    "text": "What's funny about this beat?",
+    "kind": "joke"
+  },
+  {
+    "id": "q11",
+    "text": "Hey, how's it going?",
+    "kind": "social"
+  },
+  {
+    "id": "q12",
+    "text": "You there?",
+    "kind": "social"
+  },
+  {
+    "id": "q13",
+    "text": "Thanks, that helped",
+    "kind": "social"
+  },
+  {
+    "id": "q14",
+    "text": "Hmm okay",
+    "kind": "filler"
+  },
+  {
+    "id": "q15",
+    "text": "Wait—",
+    "kind": "filler"
+  },
+  {
+    "id": "q16",
+    "text": "Is Monica in this scene?",
+    "kind": "plot"
+  },
+  {
+    "id": "q17",
+    "text": "What apartment are they in?",
+    "kind": "plot"
+  },
+  {
+    "id": "q18",
+    "text": "Who just walked in?",
+    "kind": "playhead"
+  },
+  {
+    "id": "q19",
+    "text": "Summarize the last thirty seconds without spoilers",
+    "kind": "playhead"
+  },
+  {
+    "id": "q20",
+    "text": "Why is everyone reacting that way?",
+    "kind": "plot"
+  }
+]

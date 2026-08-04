@@ -26,6 +26,8 @@ def settings() -> Settings:
     suffix = uuid.uuid4().hex[:8]
     return Settings(
         MOCK_MODE=True,
+        PILOT_LOW_LATENCY=False,
+        UTTERANCE_GATE_STRATEGY="prompt",
         QDRANT_COLLECTION=f"test_scenes_{suffix}",
         QDRANT_KNOWLEDGE_COLLECTION=f"test_knowledge_{suffix}",
     )

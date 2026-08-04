@@ -39,7 +39,12 @@ def sqlite_session_factory():
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(MOCK_MODE=True, QDRANT_COLLECTION=f"test_mem_{uuid.uuid4().hex[:8]}")
+    return Settings(
+        MOCK_MODE=True,
+        PILOT_LOW_LATENCY=False,
+        UTTERANCE_GATE_STRATEGY="prompt",
+        QDRANT_COLLECTION=f"test_mem_{uuid.uuid4().hex[:8]}",
+    )
 
 
 @pytest.fixture

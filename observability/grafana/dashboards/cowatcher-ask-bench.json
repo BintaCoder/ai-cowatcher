@@ -1,0 +1,131 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Latest ask-bench answers",
+      "type": "table",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  created_at AS time,\n  run_id,\n  question_id AS \"Question ID\",\n  LEFT(question, 80) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead (s)\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency (ms)\",\n  cache_source AS \"Cache\",\n  model_tier AS \"Tier\",\n  LEFT(answer, 200) AS \"Answer\",\n  status\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\nORDER BY created_at DESC\nLIMIT 100;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "title": "Latest run (by run_id)",
+      "type": "table",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  question_id AS \"Question ID\",\n  LEFT(question, 100) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency ms\",\n  cache_source AS \"Cache\",\n  model_name AS \"Model\",\n  LEFT(answer, 240) AS \"Answer\"\nFROM bench_ask_result\nWHERE run_id = (\n  SELECT run_id FROM bench_ask_result ORDER BY created_at DESC LIMIT 1\n)\nORDER BY question_id;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "title": "Bench client latency by cache_source (last hour)",
+      "type": "table",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  cache_source AS \"Cache\",\n  COUNT(*) AS n,\n  ROUND(AVG(latency_ms)::numeric, 0) AS avg_ms,\n  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms)::numeric, 0) AS p50_ms,\n  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)::numeric, 0) AS p95_ms\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\n  AND status = 'ok'\n  AND latency_ms >= 0\nGROUP BY cache_source\nORDER BY cache_source;",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Cache mix (last hour)",
+      "type": "piechart",
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
+      "targets": [
+        {
+          "rawSql": "SELECT cache_source AS metric, COUNT(*) AS value\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\nGROUP BY cache_source;",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "/ask p95 latency (API, Prom)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cowatcher_ask_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(cowatcher_ask_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line" } }
+      }
+    },
+    {
+      "title": "QA cache lookups (API, Prom)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "targets": [
+        {
+          "expr": "sum(rate(cowatcher_qa_cache_lookups_total[5m])) by (result)",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "title": "/ask stage p95 (API, Prom)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cowatcher_ask_stage_duration_seconds_bucket[5m])) by (le, stage))",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "Bench counter (process-local if scraped)",
+      "description": "cowatcher_bench_ask_* is emitted by the CLI process. Prefer Postgres tables for answers; server cowatcher_* metrics during the bench window for API-side latency/cache.",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 38 },
+      "targets": [
+        {
+          "expr": "sum(cowatcher_bench_ask_total) or vector(0)",
+          "legendFormat": "bench total"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["cowatcher", "bench", "ask"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Ask Bench",
+  "uid": "cowatcher-ask-bench",
+  "version": 1
+}

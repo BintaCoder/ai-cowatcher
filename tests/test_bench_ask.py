@@ -1,0 +1,147 @@
+"""Unit tests for ask-bench pure logic (no live Gemini / network)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from ai_cowatcher.bench.duration import DEFAULT_TITLE_NAME, resolve_title_id
+from ai_cowatcher.bench.sampling import clamp_playhead, parse_cache_source, sample_questions
+from ai_cowatcher.db.models import TitleIngestion
+
+QUESTIONS_FILE = (
+    Path(__file__).resolve().parents[1] / "benchmarks" / "friends_ross_questions.json"
+)
+
+
+@pytest.fixture(scope="module")
+def friends_questions() -> list[dict]:
+    data = json.loads(QUESTIONS_FILE.read_text(encoding="utf-8"))
+    assert isinstance(data, list) and len(data) == 20
+    return data
+
+
+def test_friends_ross_bank_ids(friends_questions: list[dict]) -> None:
+    ids = [q["id"] for q in friends_questions]
+    assert ids == [f"q{i:02d}" for i in range(1, 21)]
+    for q in friends_questions:
+        assert q["text"].strip()
+        assert q.get("kind")
+
+
+@pytest.mark.parametrize(
+    "model_name,model_tier,escalation,expected",
+    [
+        ("qa_cache:exact", "cache", "cache:exact", "exact"),
+        ("qa_cache:semantic", "cache", "cache:semantic", "semantic"),
+        ("gemini/gemini-2.0-flash", "fast", "none", "miss"),
+        ("", "", "", "none"),
+        (None, None, None, "none"),
+        ("QA_CACHE:Exact", "cache", "", "exact"),
+        ("some-model", "cache", "", "exact"),  # tier=cache fallback
+        ("", "fast", "cache:semantic", "semantic"),
+    ],
+)
+def test_parse_cache_source(model_name, model_tier, escalation, expected) -> None:
+    assert (
+        parse_cache_source(
+            model_name,
+            model_tier=model_tier,
+            escalation_reason=escalation,
+        )
+        == expected
+    )
+
+
+def test_clamp_playhead() -> None:
+    assert clamp_playhead(-5.0, 100.0) == 0.0
+    assert clamp_playhead(50.0, 100.0) == 50.0
+    assert clamp_playhead(200.0, 100.0) == pytest.approx(99.95)
+    assert clamp_playhead(10.0, 0.0) == 0.0
+    assert clamp_playhead(0.01, 0.02, epsilon=0.05) == 0.0
+
+
+def test_sample_questions_seed_reproducible(friends_questions: list[dict]) -> None:
+    a = sample_questions(friends_questions, n=5, duration_sec=120.0, seed=42)
+    b = sample_questions(friends_questions, n=5, duration_sec=120.0, seed=42)
+    assert a == b
+    assert len(a) == 5
+    ids = {row["id"] for row in a}
+    assert len(ids) == 5
+    for row in a:
+        assert 0.0 <= row["current_ts"] <= 120.0
+        assert row["text"]
+
+
+def test_sample_questions_different_seeds(friends_questions: list[dict]) -> None:
+    a = sample_questions(friends_questions, n=5, duration_sec=90.0, seed=1)
+    b = sample_questions(friends_questions, n=5, duration_sec=90.0, seed=2)
+    # Extremely unlikely equal under different seeds for both ids and timestamps
+    assert ([(r["id"], r["current_ts"]) for r in a] != [(r["id"], r["current_ts"]) for r in b])
+
+
+def test_sample_questions_n_validates(friends_questions: list[dict]) -> None:
+    with pytest.raises(ValueError):
+        sample_questions(friends_questions, n=0, duration_sec=10.0, seed=0)
+    with pytest.raises(ValueError):
+        sample_questions([], n=1, duration_sec=10.0, seed=0)
+
+
+def test_sample_playhead_clamped_to_duration(friends_questions: list[dict]) -> None:
+    rows = sample_questions(friends_questions, n=5, duration_sec=0.01, seed=7)
+    for row in rows:
+        assert row["current_ts"] == 0.0
+
+
+def test_http_error_helpers() -> None:
+    from ai_cowatcher.bench.ask_runner import (
+        _http_error_detail,
+        _is_retryable_ask_status,
+    )
+
+    class _R:
+        def __init__(self, body):
+            self._body = body
+            self.text = json.dumps(body) if isinstance(body, dict) else str(body)
+            self.reason_phrase = "Error"
+
+        def json(self):
+            return self._body
+
+    detail = _http_error_detail(
+        _R({"detail": 'GeminiException - "message": "high demand"'})
+    )
+    assert "high demand" in detail
+    assert _is_retryable_ask_status(500, detail)
+    assert _is_retryable_ask_status(503, "unavailable")
+    assert not _is_retryable_ask_status(400, "bad request")
+
+
+def test_default_title_name() -> None:
+    assert DEFAULT_TITLE_NAME == "Friends Ross"
+
+
+def test_resolve_title_id_by_display_name_and_slug() -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from ai_cowatcher.db.base import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        session.add(
+            TitleIngestion(
+                title_id="friends_ross",
+                video_path="/tmp/x.mp4",
+                status="completed",
+                display_name="Friends Ross",
+            )
+        )
+        session.commit()
+        assert resolve_title_id(session, "Friends Ross") == "friends_ross"
+        assert resolve_title_id(session, "friends_ross") == "friends_ross"
+        assert resolve_title_id(session, "FRIENDS ROSS") == "friends_ross"

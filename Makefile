@@ -1,4 +1,4 @@
-.PHONY: up up-core down logs install api api-dev ingest worker health
+.PHONY: up up-core down logs install api api-dev ingest worker health bench-ask
 
 # Full stack including brokers (Kafka/RabbitMQ). Kafka uses apache/kafka (not Bitnami).
 up:
@@ -47,3 +47,16 @@ worker:
 
 health:
 	curl -s http://localhost:8000/health | python3 -m json.tool
+
+# Sample 5 random playhead questions against live /ask (real Gemini; MOCK_MODE=false).
+# Results → Postgres bench_ask_result + benchmarks/results/<run_id>.jsonl → Grafana "Ask Bench".
+# Usage: make bench-ask
+#        make bench-ask SEED=42 N=5 TITLE="Friends Ross"
+bench-ask:
+	TOKENIZERS_PARALLELISM=false PYTHONPATH=. .venv/bin/python -m ai_cowatcher.bench.ask_runner \
+		--title-id "$(or $(TITLE),Friends Ross)" \
+		--n "$(or $(N),5)" \
+		$(if $(SEED),--seed $(SEED),) \
+		$(if $(BASE_URL),--base-url $(BASE_URL),) \
+		$(if $(DURATION),--duration-sec $(DURATION),) \
+		$(if $(ALLOW_MOCK),--allow-mock,)
