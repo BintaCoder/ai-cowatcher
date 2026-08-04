@@ -45,6 +45,13 @@ cowatcher-warm-qa-cache --title-id friends_ross
 cowatcher-warm-qa-cache --persona-id witty_friend --title-id friends_ross
 ```
 
+Cold first-pass benches often show 100% **miss** — that means a cold cache / new persona key space, not a broken path. Double-run the same seed to confirm hits. See `docs/BENCH_ASK.md`.
+
+## SOCIAL / FILLER free path
+
+Presence checks and fillers (`You there?`, `Hey, how's it going?`, `Thanks, that helped`, `Hmm okay`, `Wait—`) resolve on the **utterance gate** before Gemini for every persona. The companion’s `canned_social_reply` is returned as a static string (`model_name=gate:free`). They are not re-prompted through the LLM.
+
+Invalid `persona_id` falls back to `DEFAULT_PERSONA_ID` on the same merged pilot path — never the multi-tool legacy agent.
 ## Watch UI
 
 Open `/watch`:
@@ -72,5 +79,5 @@ curl -s localhost:8000/ask -H 'content-type: application/json' -d '{
 ## Tests
 
 ```bash
-pytest tests/test_persona.py tests/test_qa_cache.py -q
+pytest tests/test_persona.py tests/test_persona_latency_gate.py tests/test_utterance_gate.py tests/test_qa_cache.py -q
 ```

@@ -98,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "evidence_max_chars_per_field": settings.evidence_max_chars_per_field,
                 "qa_cache_enabled": settings.qa_cache_enabled,
                 "qa_cache_semantic_threshold": settings.qa_cache_semantic_threshold,
+                "qa_cache_ts_bucket_sec": settings.qa_cache_ts_bucket_sec,
                 "session_cost_budget_usd": settings.session_cost_budget_usd,
             },
             "llm": {
@@ -108,6 +109,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "escalation_min_chars": settings.llm_escalation_min_chars,
                 "primary_model": settings.llm_primary_model,
                 "fallback_model": settings.llm_fallback_model,
+                "max_tokens": settings.llm_max_tokens,
+                "short_answer_max_tokens": settings.llm_short_answer_max_tokens,
+                "reasoning_effort": settings.llm_reasoning_effort,
                 "tier_counts": conversation_tier_counts(),
             },
             "metrics_lite": metrics_lite_summary(),

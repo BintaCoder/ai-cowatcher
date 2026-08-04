@@ -24,6 +24,8 @@ cp .env.example .env
 # Set GEMINI_API_KEY (or GOOGLE_API_KEY) when MOCK_MODE=false
 docker compose up -d
 make api   # single process (avoid --reload with BGE warm)
+# QA cache off by default; for cache benches/demos:
+# make api QA_CACHE_ENABLED=true
 ```
 
 With `MOCK_MODE=true`, AI providers use local mocks — no cloud keys required for tests.

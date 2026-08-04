@@ -106,7 +106,11 @@ class AskLatencyTracker:
                 observe_ask_stages,
             )
 
-            observe_ask_stages(self.stages_ms)
+            persona = self.meta.get("persona_id")
+            observe_ask_stages(
+                self.stages_ms,
+                persona_id=str(persona) if persona is not None else None,
+            )
         except Exception:  # noqa: BLE001
             pass
         return payload

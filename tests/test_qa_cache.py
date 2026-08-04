@@ -48,7 +48,8 @@ def test_exact_hit_after_store(qa_cache: QACache):
         "What just happened?",
         "They're arguing in the foyer.",
     )
-    hit = qa_cache.lookup("t1", 45.0, "what just happened")  # same 30s bucket, norm
+    # Same floor-division bucket for 45s default (42//45 == 44//45 == 0)
+    hit = qa_cache.lookup("t1", 44.0, "what just happened")
     assert hit is not None
     assert hit.source == "exact"
     assert "foyer" in hit.answer
@@ -71,13 +72,13 @@ def test_persona_isolation_same_question(qa_cache: QACache):
         persona_id="easygoing_friend",
     )
     witty = qa_cache.lookup(
-        "t1", 45.0, "what just happened", persona_id="witty_friend"
+        "t1", 44.0, "what just happened", persona_id="witty_friend"
     )
     easy = qa_cache.lookup(
-        "t1", 45.0, "what just happened", persona_id="easygoing_friend"
+        "t1", 44.0, "what just happened", persona_id="easygoing_friend"
     )
     other = qa_cache.lookup(
-        "t1", 45.0, "what just happened", persona_id="calm_scout"
+        "t1", 44.0, "what just happened", persona_id="calm_scout"
     )
     assert witty is not None and witty.source == "exact"
     assert "Witty" in witty.answer
@@ -89,10 +90,10 @@ def test_persona_isolation_same_question(qa_cache: QACache):
     # so MockTextEmbedder vectors align — exact tier used normalize already).
     qa_cache._exact = InMemoryExactKV()
     witty_sem = qa_cache.lookup(
-        "t1", 45.0, "What just happened?", persona_id="witty_friend"
+        "t1", 44.0, "What just happened?", persona_id="witty_friend"
     )
     calm_sem = qa_cache.lookup(
-        "t1", 45.0, "What just happened?", persona_id="calm_scout"
+        "t1", 44.0, "What just happened?", persona_id="calm_scout"
     )
     assert witty_sem is not None and witty_sem.source == "semantic"
     assert "Witty" in witty_sem.answer

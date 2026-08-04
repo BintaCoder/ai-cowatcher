@@ -70,31 +70,48 @@ class Persona:
 
 
 def _parse_persona(data: dict) -> Persona:
-    traits_raw = data.get("traits") or {}
-    tts_raw = data.get("tts") or {}
+    """Parse one persona object; raise ValueError if required fields are incomplete."""
+    pid = str(data.get("persona_id") or "").strip()
+    if not pid:
+        raise ValueError("persona_id is required")
+    display = str(data.get("display_name") or "").strip()
+    if not display:
+        raise ValueError(f"{pid}: display_name is required")
+    traits_raw = data.get("traits")
+    if not isinstance(traits_raw, dict):
+        raise ValueError(f"{pid}: traits object is required")
+    for key in ("humor", "formality", "warmth", "verbosity"):
+        if key not in traits_raw:
+            raise ValueError(f"{pid}: traits.{key} is required")
+    style = str(data.get("style_notes") or "").strip()
+    if not style:
+        raise ValueError(f"{pid}: style_notes is required")
+    canned = str(data.get("canned_social_reply") or "").strip()
+    if not canned:
+        raise ValueError(f"{pid}: canned_social_reply is required")
     avoid_raw = data.get("avoid") or []
     if isinstance(avoid_raw, str):
         avoid: tuple[str, ...] = (avoid_raw,)
     else:
         avoid = tuple(str(item) for item in avoid_raw)
+    tts_raw = data.get("tts") or {}
+    if tts_raw and not isinstance(tts_raw, dict):
+        raise ValueError(f"{pid}: tts must be an object when present")
     return Persona(
-        persona_id=str(data["persona_id"]).strip(),
-        display_name=str(data.get("display_name") or data["persona_id"]).strip(),
+        persona_id=pid,
+        display_name=display,
         traits=PersonaTraits(
-            humor=float(traits_raw.get("humor", 0.5)),
-            formality=float(traits_raw.get("formality", 0.3)),
-            warmth=float(traits_raw.get("warmth", 0.7)),
-            verbosity=float(traits_raw.get("verbosity", 0.3)),
+            humor=float(traits_raw["humor"]),
+            formality=float(traits_raw["formality"]),
+            warmth=float(traits_raw["warmth"]),
+            verbosity=float(traits_raw["verbosity"]),
         ),
-        style_notes=str(data.get("style_notes") or "").strip(),
+        style_notes=style,
         avoid=avoid,
-        canned_social_reply=str(
-            data.get("canned_social_reply")
-            or "Right here with you — ask about the show anytime."
-        ).strip(),
+        canned_social_reply=canned,
         tts=PersonaTts(
-            rate=float(tts_raw.get("rate", 1.0)),
-            pitch=float(tts_raw.get("pitch", 1.0)),
+            rate=float(tts_raw.get("rate", 1.0)) if isinstance(tts_raw, dict) else 1.0,
+            pitch=float(tts_raw.get("pitch", 1.0)) if isinstance(tts_raw, dict) else 1.0,
         ),
     )
 

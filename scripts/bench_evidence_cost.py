@@ -48,6 +48,24 @@ def _messages(scene_json: str) -> list[dict]:
     ]
 
 
+def _stats(xs: list[int], *, questions: int) -> dict:
+    mean_t = statistics.mean(xs)
+    cost = (
+        estimate_usd(
+            prompt_tokens=int(mean_t),
+            completion_tokens=ASSUMED_COMPLETION_TOKENS,
+            input_usd_per_mtok=DEFAULT_INPUT_USD_PER_MTOK,
+            output_usd_per_mtok=DEFAULT_OUTPUT_USD_PER_MTOK,
+        )
+        * questions
+    )
+    return {
+        "mean_prompt_tokens": round(mean_t, 1),
+        "p50_prompt_tokens": int(statistics.median(xs)),
+        "est_usd_for_n_asks": round(cost, 6),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Compare merged prompt tokens before/after evidence trim"
@@ -60,8 +78,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--raw-chars", type=int, default=800, help="Transcript chars per field before"
     )
-    parser.add_argument("--max-scenes", type=int, default=3)
-    parser.add_argument("--max-chars", type=int, default=280)
+    parser.add_argument("--max-scenes", type=int, default=2)
+    parser.add_argument("--max-chars", type=int, default=200)
+    parser.add_argument(
+        "--candidates",
+        type=str,
+        default="",
+        help=(
+            "Optional comma list of max_scenes:max_chars candidates to compare, "
+            "e.g. '3:280,2:200,2:160' (defaults alone if empty)"
+        ),
+    )
     parser.add_argument(
         "--out",
         type=Path,
@@ -70,37 +97,41 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    candidates: list[tuple[int, int]] = []
+    if args.candidates.strip():
+        for part in args.candidates.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            scenes_s, chars_s = part.split(":", 1)
+            candidates.append((int(scenes_s), int(chars_s)))
+    if not candidates:
+        candidates = [(args.max_scenes, args.max_chars)]
+
     before_tokens: list[int] = []
-    after_tokens: list[int] = []
+    candidate_tokens: dict[str, list[int]] = {
+        f"scenes={s}_chars={c}": [] for s, c in candidates
+    }
     for i in range(args.questions):
         # mild variance by index
         raw = _fake_scenes(args.raw_scenes + (i % 2), args.raw_chars + (i % 50))
         before = json.dumps(raw, ensure_ascii=False)
-        after = scene_evidence_json(
-            [raw], max_scenes=args.max_scenes, max_chars_per_field=args.max_chars
-        )
         before_tokens.append(estimate_messages_tokens(_messages(before)))
-        after_tokens.append(estimate_messages_tokens(_messages(after)))
-
-    def stats(xs: list[int]) -> dict:
-        mean_t = statistics.mean(xs)
-        cost = (
-            estimate_usd(
-                prompt_tokens=int(mean_t),
-                completion_tokens=ASSUMED_COMPLETION_TOKENS,
-                input_usd_per_mtok=DEFAULT_INPUT_USD_PER_MTOK,
-                output_usd_per_mtok=DEFAULT_OUTPUT_USD_PER_MTOK,
+        for s, c in candidates:
+            key = f"scenes={s}_chars={c}"
+            after = scene_evidence_json(
+                [raw], max_scenes=s, max_chars_per_field=c
             )
-            * args.questions
-        )
-        return {
-            "mean_prompt_tokens": round(mean_t, 1),
-            "p50_prompt_tokens": int(statistics.median(xs)),
-            "est_usd_for_n_asks": round(cost, 6),
-        }
+            candidate_tokens[key].append(estimate_messages_tokens(_messages(after)))
 
-    before_s = stats(before_tokens)
-    after_s = stats(after_tokens)
+    before_s = _stats(before_tokens, questions=args.questions)
+    after_map = {
+        key: _stats(vals, questions=args.questions)
+        for key, vals in candidate_tokens.items()
+    }
+    preferred = f"scenes={args.max_scenes}_chars={args.max_chars}"
+    primary_key = preferred if preferred in after_map else next(iter(after_map))
+    after_s = after_map[primary_key]
     reduction = 1.0 - (
         after_s["mean_prompt_tokens"] / before_s["mean_prompt_tokens"]
         if before_s["mean_prompt_tokens"]
@@ -112,11 +143,13 @@ def main(argv: list[str] | None = None) -> int:
         "assumed_completion_tokens": ASSUMED_COMPLETION_TOKENS,
         "before_trim": before_s,
         "after_trim": after_s,
+        "candidate_trim": after_map,
         "prompt_token_reduction_fraction": round(reduction, 4),
         "note": (
             "Token counts are ~4-char estimates for offline bench; "
             "run live /ask with metrics for provider-reported usage. "
-            "Evidence trim does not touch spoiler filter (start_ts<=current_ts)."
+            "Evidence trim does not touch spoiler filter (start_ts<=current_ts). "
+            "Compare candidates with --candidates 3:280,2:200,2:160."
         ),
     }
     print(json.dumps(summary, indent=2))

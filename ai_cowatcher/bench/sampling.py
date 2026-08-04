@@ -16,7 +16,8 @@ def parse_cache_source(
 
     Server stamps cache hits as ``model_name="qa_cache:exact|semantic"`` and
     ``model_tier="cache"``. Agent/LLM answers after a cache miss use a real
-    model name → recorded as ``miss``. Empty / missing fields → ``none``.
+    model name → recorded as ``miss``. Free-gate replies use ``gate:free``
+    → ``free`` (no QA cache / no LLM). Empty / missing fields → ``none``.
     """
     name = (model_name or "").strip()
     lower = name.lower()
@@ -27,6 +28,9 @@ def parse_cache_source(
         if src:
             return src
         return "miss"
+
+    if lower.startswith("gate:") or (model_tier or "").strip().lower() == "gate":
+        return "free"
 
     reason = (escalation_reason or "").strip().lower()
     if reason.startswith("cache:"):

@@ -42,6 +42,8 @@ def test_friends_ross_bank_ids(friends_questions: list[dict]) -> None:
         ("QA_CACHE:Exact", "cache", "", "exact"),
         ("some-model", "cache", "", "exact"),  # tier=cache fallback
         ("", "fast", "cache:semantic", "semantic"),
+        ("gate:free", "gate", "gate:social", "free"),
+        ("", "gate", "gate:ignore_filler", "free"),
     ],
 )
 def test_parse_cache_source(model_name, model_tier, escalation, expected) -> None:

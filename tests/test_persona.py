@@ -21,10 +21,15 @@ def test_personas_load_from_package():
     ids = {p.persona_id for p in personas}
     assert "easygoing_friend" in ids
     assert "witty_friend" in ids
-    assert len(personas) >= 2
+    assert "calm_scout" in ids
+    assert len(personas) >= 3
+    for p in personas:
+        assert p.display_name
+        assert p.style_notes
+        assert p.canned_social_reply
+        assert 0.0 <= p.traits.humor <= 1.0
+        assert p.tts.rate > 0
     witty = get_persona("witty_friend")
-    assert witty.canned_social_reply
-    assert witty.tts.rate > 0
     assert witty.traits.humor >= witty.traits.formality
 
 

@@ -22,8 +22,9 @@ Answers land in **Postgres** for Grafana tables; bonus JSONL under `benchmarks/r
 
    ```bash
    make up-core   # postgres redis qdrant neo4j minio prometheus grafana
-   # .env: MOCK_MODE=false, GEMINI_API_KEY=..., QA_CACHE_ENABLED=true (default)
-   make api
+   # .env: MOCK_MODE=false, GEMINI_API_KEY=...
+   make api                              # QA cache off by default
+   # make api QA_CACHE_ENABLED=true      # for cache benches
    ```
 
 3. Grafana: http://localhost:3000 (admin / cowatcher)
@@ -81,7 +82,40 @@ Server cache hits stamp:
 - `model_tier = "cache"`
 - `escalation_reason = "cache:exact|semantic"`
 
-The runner parses that into `cache_source`. Any other non-empty `model_name` (real Gemini model string) is recorded as **`miss`** (lookup ran, agent answered). Empty fields → **`none`** (errors).
+The runner parses that into `cache_source`. Other stamps:
+
+| Response | `cache_source` |
+|----------|----------------|
+| real Gemini model string after agent answer | **`miss`** (lookup ran, agent answered) |
+| free-gate reply (`model_name=gate:free`, `model_tier=gate`) | **`free`** (no LLM / no QA store) |
+| empty / error | **`none`** |
+
+### Why first-pass exports often show ~100% miss
+
+The ask bench **does not disable the QA cache**. On a cold cache (or a fresh
+`persona_id` key space after personality was added), every content sample is a
+genuine **miss**. Social/filler lines now stamp **`free`** (heuristic canned reply).
+
+To measure exact hits:
+
+```bash
+# same seed + persona twice — second pass should show exact on content rows
+make bench-ask PERSONA=witty_friend SEED=42 N=5
+make bench-ask PERSONA=witty_friend SEED=42 N=5
+```
+
+Persona is part of the exact Redis key and semantic filter, so repeats under a
+*different* companion will still miss. That is intentional isolation, not a bug.
+
+## Quality regression after persona changes
+
+```bash
+# include social/filler (bank q11–q15) and all personas
+make bench-ask ALL_PERSONAS=1 N=10 SEED=7
+```
+
+Expect free-path socials near-instant; content in the pilot band; no 10s+ legacy
+signatures when `PILOT_LOW_LATENCY=true`.
 
 ## Grafana
 
@@ -92,13 +126,20 @@ The runner parses that into `cache_source`. Any other non-empty `model_name` (re
 | Postgres DS | `observability/grafana/provisioning/datasources/postgres.yml` → `postgres:5432`, db/user/password `cowatcher` (matches `docker-compose.yml`) |
 | Prometheus DS | existing Prometheus provision |
 
-Panels:
+**Panels (quality-first):**
 
-- Latest hour + latest `run_id` answer tables (Question / Playhead / Latency / Cache / Answer)
-- Cache mix + latency by `cache_source` from Postgres
-- API-side Prom: `/ask` p95, QA cache lookup rates, stage histograms during the bench window
+1. **Answer quality review (Persona · Gender · Q · A)** — full answer text + Persona + Gender for the last 6h  
+2. **Latest run — compare by Persona / Gender** — all rows for the newest `run_id`  
+3. **Rows by Persona × Gender** — counts and avg latency  
 
-After changing provisioning, restart Grafana (`docker compose restart grafana`).
+After changing provisioning or the dashboard JSON, reload Grafana:
+
+```bash
+docker compose restart grafana
+# hard-refresh browser (cmd+shift+R) → AI Co-watcher → Ask Bench
+```
+
+Ensure you re-run the bench **after** API restart (so `persona_id` / `companion_gender` columns exist and are filled). Older rows may show Persona as `(default)` / Gender as `(unset)`.
 
 ### Manual SQL check
 

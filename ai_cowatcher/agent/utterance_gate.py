@@ -28,8 +28,19 @@ _FILLER_ONLY = re.compile(
     r"like|well|so|yeah|yep|yup|ya|nah|nope|"
     r"okay|ok|right|sure|alright|whatever|"
     r"you know|i mean|kind of|kinda|sort of|"
-    r"(?:uh|um|hmm|ah)(?:\s+(?:uh|um|hmm|ah|like|so|well))*"
+    r"wait(?:\s+what)?|"
+    r"(?:uh|um|hmm|ah)(?:\s+(?:uh|um|hmm|ah|like|so|well|okay|ok))*"
     r")\.?\!?$",
+    re.IGNORECASE,
+)
+
+# Multi-token fillers (STT fragments) that fullmatch list never covers alone.
+_FILLER_PHRASE = re.compile(
+    r"^(?:"
+    r"hmm+\s+okay|hmm+\s+ok|ok(?:ay)?\s+yeah|"
+    r"uh\s+huh|mm+\s+hmm|"
+    r"wait[\s.…-]*"
+    r")$",
     re.IGNORECASE,
 )
 
@@ -41,6 +52,22 @@ _SOCIAL = re.compile(
     r"good morning|good night|good evening|"
     r"how are you|what's up|whats up|"
     r"cool|nice|awesome|great|lol|lmao"
+    r")\.?\!?$",
+    re.IGNORECASE,
+)
+
+# Longer social / presence checks (bench q11–q13 style) — must short-circuit before LLM.
+_SOCIAL_PHRASE = re.compile(
+    r"^(?:"
+    r"you\s+there|still\s+there|anyone\s+there|"
+    r"hey(?:\s+there)?,?\s+how(?:'s|s|\s+is|\s+are)\s+(?:it|you)(?:\s+going|\s+doing)?|"
+    r"how(?:'s|s|\s+is)\s+it\s+going|"
+    r"how\s+are\s+you(?:\s+doing)?|"
+    r"thanks?,?\s+that\s+helped|"
+    r"thank\s+you,?\s+that\s+helped|"
+    r"thanks?\s+a\s+lot|thanks?\s+so\s+much|"
+    r"you\s+good|all\s+good|"
+    r"just\s+checking\s+in"
     r")\.?\!?$",
     re.IGNORECASE,
 )
@@ -122,16 +149,21 @@ def classify_utterance(
     *,
     settings: Settings,
     completion: CompletionClient | None = None,
+    persona_id: str | None = None,
 ) -> UtteranceDecision:
     """Heuristic gate first; optional mini LLM only when ambiguous."""
     decision = _classify_utterance_inner(
         question, settings=settings, completion=completion
     )
-    _record_gate_outcome(decision)
+    _record_gate_outcome(decision, persona_id=persona_id)
     return decision
 
 
-def _record_gate_outcome(decision: UtteranceDecision) -> None:
+def _record_gate_outcome(
+    decision: UtteranceDecision,
+    *,
+    persona_id: str | None = None,
+) -> None:
     reason = decision.reason or ""
     if reason.startswith("gate:prompt_"):
         outcome = "prompt_llm"
@@ -143,7 +175,11 @@ def _record_gate_outcome(decision: UtteranceDecision) -> None:
     try:
         from ai_cowatcher.observability.prometheus_metrics import record_utterance_gate
 
-        record_utterance_gate(outcome=outcome, action=decision.action)
+        record_utterance_gate(
+            outcome=outcome,
+            action=decision.action,
+            persona_id=persona_id or "",
+        )
     except Exception:  # noqa: BLE001
         pass
     logger.info(
@@ -154,6 +190,7 @@ def _record_gate_outcome(decision: UtteranceDecision) -> None:
                 "action": decision.action,
                 "reason": decision.reason,
                 "short_circuit": decision.short_circuit,
+                "persona_id": persona_id or "",
             },
             separators=(",", ":"),
         )
@@ -202,7 +239,7 @@ def _classify_utterance_inner(
             speak=False,
         )
 
-    if _SOCIAL.fullmatch(cleaned):
+    if _SOCIAL.fullmatch(cleaned) or _SOCIAL_PHRASE.fullmatch(cleaned):
         return UtteranceDecision(
             action="social",
             reason="gate:social",
@@ -291,6 +328,8 @@ def _classify_utterance_inner(
 def _normalize(text: str) -> str:
     text = text.strip().lower()
     text = re.sub(r"[“”\"']", "", text)
+    # Collapse punctuation STT often leaves on fillers ("Wait—", "Hmm…")
+    text = re.sub(r"[—–\-…]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     text = text.strip(" .,!?…")
     return text
@@ -298,6 +337,8 @@ def _normalize(text: str) -> str:
 
 def _is_noise_or_filler(cleaned: str) -> bool:
     if _FILLER_ONLY.fullmatch(cleaned):
+        return True
+    if _FILLER_PHRASE.fullmatch(cleaned):
         return True
     # Mostly non-letters (STT garbage).
     letters = sum(1 for c in cleaned if c.isalpha())

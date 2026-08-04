@@ -24,8 +24,13 @@ def gate_settings() -> Settings:
         ("um", "ignore"),
         ("uh huh", "ignore"),
         ("hmm", "ignore"),
+        ("Hmm okay", "ignore"),
+        ("Wait—", "ignore"),
         ("hi", "social"),
         ("thanks", "social"),
+        ("You there?", "social"),
+        ("Hey, how's it going?", "social"),
+        ("Thanks, that helped", "social"),
         ("what's the weather", "off_topic"),
         ("joke", "joke"),
         ("one liner", "joke"),
@@ -91,3 +96,15 @@ def test_prompt_strategy_on_ambiguous():
         completion=client,
     )
     assert yes_case.action == "content"
+
+
+def test_bench_social_lines_fullmatch_free(gate_settings: Settings):
+    for q in (
+        "You there?",
+        "Hey, how's it going?",
+        "Thanks, that helped",
+        "Hmm okay",
+        "Wait—",
+    ):
+        d = classify_utterance(q, settings=gate_settings)
+        assert d.short_circuit, f"{q!r} should free short-circuit, got {d}"

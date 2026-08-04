@@ -28,8 +28,8 @@ def test_scene_evidence_top_k():
         {"scene_id": f"s{i}", "transcript": f"line {i} " * 40, "caption": ""}
         for i in range(6)
     ]
-    payload = scene_evidence_json([scenes], max_scenes=3, max_chars_per_field=40)
-    assert "s0" in payload and "s2" in payload
-    assert "s5" not in payload
-    compacted = compact_scene_payloads([scenes], max_scenes=3, max_chars_per_field=40)
-    assert len(compacted[0]) == 3
+    payload = scene_evidence_json([scenes], max_scenes=2, max_chars_per_field=40)
+    assert "s0" in payload and "s1" in payload
+    assert "s2" not in payload
+    compacted = compact_scene_payloads([scenes], max_scenes=2, max_chars_per_field=40)
+    assert len(compacted[0]) == 2

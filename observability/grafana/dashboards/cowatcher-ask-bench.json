@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -7,55 +9,247 @@
   "links": [],
   "panels": [
     {
-      "title": "Latest ask-bench answers",
+      "title": "Answer quality review (Persona \u00b7 Gender \u00b7 Q \u00b7 A)",
+      "description": "Full answer text with companion persona and gender for tone/quality review. Filtered to last 6h. Empty Persona usually means older bench rows before persona columns were stored \u2014 re-run make bench-ask.",
       "type": "table",
-      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cowatcher-postgres"
+      },
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
-          "rawSql": "SELECT\n  created_at AS time,\n  run_id,\n  persona_id AS \"Persona\",\n  companion_gender AS \"Gender\",\n  question_id AS \"Question ID\",\n  LEFT(question, 80) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead (s)\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency (ms)\",\n  cache_source AS \"Cache\",\n  model_tier AS \"Tier\",\n  LEFT(answer, 200) AS \"Answer\",\n  status\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\nORDER BY created_at DESC\nLIMIT 100;",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cowatcher-postgres"
+          },
+          "editorMode": "code",
           "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  created_at AS \"Time\",\n  run_id AS \"Run\",\n  COALESCE(NULLIF(TRIM(persona_id), ''), '(default)') AS \"Persona\",\n  COALESCE(NULLIF(TRIM(companion_gender), ''), '(unset)') AS \"Gender\",\n  question_id AS \"QID\",\n  question AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead s\",\n  answer AS \"Answer\",\n  cache_source AS \"Cache\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency ms\",\n  status AS \"Status\"\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '6 hours'\nORDER BY created_at DESC\nLIMIT 200;",
           "refId": "A"
         }
       ],
-      "options": { "showHeader": true }
+      "options": {
+        "showHeader": true,
+        "cellHeight": "md",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "auto",
+              "wrapText": true
+            },
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Persona"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Gender"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Answer"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 480
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Question"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 220
+              }
+            ]
+          }
+        ]
+      }
     },
     {
-      "title": "Latest run (by run_id)",
+      "title": "Latest run \u2014 compare by Persona / Gender",
+      "description": "All rows for the most recent run_id, sorted by persona then question so you can compare tone across companions.",
       "type": "table",
-      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cowatcher-postgres"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
       "targets": [
         {
-          "rawSql": "SELECT\n  persona_id AS \"Persona\",\n  companion_gender AS \"Gender\",\n  question_id AS \"Question ID\",\n  LEFT(question, 100) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency ms\",\n  cache_source AS \"Cache\",\n  model_name AS \"Model\",\n  LEFT(answer, 240) AS \"Answer\"\nFROM bench_ask_result\nWHERE run_id = (\n  SELECT run_id FROM bench_ask_result ORDER BY created_at DESC LIMIT 1\n)\nORDER BY persona_id, question_id;",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cowatcher-postgres"
+          },
+          "editorMode": "code",
           "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  COALESCE(NULLIF(TRIM(persona_id), ''), '(default)') AS \"Persona\",\n  COALESCE(NULLIF(TRIM(companion_gender), ''), '(unset)') AS \"Gender\",\n  question_id AS \"QID\",\n  question AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead s\",\n  answer AS \"Answer\",\n  cache_source AS \"Cache\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency ms\",\n  model_name AS \"Model\"\nFROM bench_ask_result\nWHERE run_id = (\n  SELECT run_id FROM bench_ask_result ORDER BY created_at DESC LIMIT 1\n)\nORDER BY 1, 2, question_id;",
           "refId": "A"
         }
       ],
-      "options": { "showHeader": true }
+      "options": {
+        "showHeader": true,
+        "cellHeight": "md"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "auto",
+              "wrapText": true
+            },
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Answer"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 500
+              }
+            ]
+          }
+        ]
+      }
     },
     {
-      "title": "Bench client latency by cache_source (last hour)",
+      "title": "Rows by Persona \u00d7 Gender (last 6h)",
       "type": "table",
-      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cowatcher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 28
+      },
       "targets": [
         {
-          "rawSql": "SELECT\n  cache_source AS \"Cache\",\n  COUNT(*) AS n,\n  ROUND(AVG(latency_ms)::numeric, 0) AS avg_ms,\n  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms)::numeric, 0) AS p50_ms,\n  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)::numeric, 0) AS p95_ms\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\n  AND status = 'ok'\n  AND latency_ms >= 0\nGROUP BY cache_source\nORDER BY cache_source;",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cowatcher-postgres"
+          },
+          "editorMode": "code",
           "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  COALESCE(NULLIF(TRIM(persona_id), ''), '(default)') AS \"Persona\",\n  COALESCE(NULLIF(TRIM(companion_gender), ''), '(unset)') AS \"Gender\",\n  COUNT(*) AS n,\n  ROUND(AVG(latency_ms) FILTER (WHERE status = 'ok' AND latency_ms >= 0)::numeric, 0) AS avg_ms\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '6 hours'\nGROUP BY 1, 2\nORDER BY 1, 2;",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "title": "Latency by Cache (last 6h)",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cowatcher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 28
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cowatcher-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  cache_source AS \"Cache\",\n  COUNT(*) AS n,\n  ROUND(AVG(latency_ms)::numeric, 0) AS avg_ms,\n  ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms)::numeric, 0) AS p50_ms,\n  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)::numeric, 0) AS p95_ms\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '6 hours'\n  AND status = 'ok'\n  AND latency_ms >= 0\nGROUP BY cache_source\nORDER BY cache_source;",
           "refId": "A"
         }
       ]
     },
     {
-      "title": "Cache mix (last hour)",
+      "title": "Cache mix (last 6h)",
       "type": "piechart",
-      "datasource": { "type": "grafana-postgresql-datasource", "uid": "cowatcher-postgres" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cowatcher-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 28
+      },
       "targets": [
         {
-          "rawSql": "SELECT cache_source AS metric, COUNT(*) AS value\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\nGROUP BY cache_source;",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cowatcher-postgres"
+          },
+          "editorMode": "code",
           "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT cache_source AS metric, COUNT(*) AS value\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '6 hours'\nGROUP BY cache_source;",
           "refId": "A"
         }
       ]
@@ -63,8 +257,16 @@
     {
       "title": "/ask p95 latency (API, Prom)",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(cowatcher_ask_request_duration_seconds_bucket[5m])) by (le))",
@@ -76,14 +278,27 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s", "custom": { "drawStyle": "line" } }
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line"
+          }
+        }
       }
     },
     {
       "title": "QA cache lookups (API, Prom)",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
       "targets": [
         {
           "expr": "sum(rate(cowatcher_qa_cache_lookups_total[5m])) by (result)",
@@ -92,40 +307,75 @@
       ]
     },
     {
-      "title": "/ask stage p95 (API, Prom)",
+      "title": "QA cache hit rate (primary)",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(cowatcher_ask_stage_duration_seconds_bucket[5m])) by (le, stage))",
-          "legendFormat": "{{stage}}"
+          "expr": "sum(rate(cowatcher_qa_cache_hit_total[5m])) / clamp_min(sum(rate(cowatcher_qa_cache_hit_total[5m])) + sum(rate(cowatcher_qa_cache_miss_total[5m])), 1e-9)",
+          "legendFormat": "hit_rate"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      }
     },
     {
-      "title": "Bench counter (process-local if scraped)",
-      "description": "cowatcher_bench_ask_* is emitted by the CLI process. Prefer Postgres tables for answers; server cowatcher_* metrics during the bench window for API-side latency/cache.",
-      "type": "stat",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 38 },
+      "title": "QA cache hit total by source",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
       "targets": [
         {
-          "expr": "sum(cowatcher_bench_ask_total) or vector(0)",
-          "legendFormat": "bench total"
+          "expr": "sum(rate(cowatcher_qa_cache_hit_total[5m])) by (source)",
+          "legendFormat": "{{source}}"
+        },
+        {
+          "expr": "sum(rate(cowatcher_qa_cache_miss_total[5m]))",
+          "legendFormat": "miss"
         }
       ]
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
-  "tags": ["cowatcher", "bench", "ask"],
-  "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "tags": [
+    "cowatcher",
+    "bench",
+    "ask",
+    "persona"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "Ask Bench",
   "uid": "cowatcher-ask-bench",
-  "version": 1
+  "version": 2
 }

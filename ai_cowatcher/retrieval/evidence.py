@@ -16,7 +16,7 @@ def _clip(text: str, max_chars: int) -> str:
 def compact_scene_dict(
     scene: dict[str, Any],
     *,
-    max_chars_per_field: int = 280,
+    max_chars_per_field: int = 200,
 ) -> dict[str, Any]:
     """Copy scene tool dict with truncated transcript/caption; keep spoiler times."""
     out = dict(scene)
@@ -31,8 +31,8 @@ def compact_scene_dict(
 def compact_scene_payloads(
     payloads: list[Any],
     *,
-    max_scenes: int = 3,
-    max_chars_per_field: int = 280,
+    max_scenes: int = 2,
+    max_chars_per_field: int = 200,
 ) -> list[list[dict[str, Any]]]:
     """
     Payloads from scene_lookup are typically a list of scene dicts (or nested lists
@@ -57,8 +57,8 @@ def compact_scene_payloads(
 def scene_evidence_json(
     payloads: list[Any],
     *,
-    max_scenes: int = 3,
-    max_chars_per_field: int = 280,
+    max_scenes: int = 2,
+    max_chars_per_field: int = 200,
 ) -> str:
     compacted = compact_scene_payloads(
         payloads, max_scenes=max_scenes, max_chars_per_field=max_chars_per_field

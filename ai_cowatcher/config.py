@@ -61,16 +61,20 @@ class Settings(BaseSettings):
     )
 
     # ── Q&A response cache (exact Redis + semantic Qdrant) ─────────────────────
-    qa_cache_enabled: bool = Field(default=True, alias="QA_CACHE_ENABLED")
+    # Default off for latency isolation; demos: make api QA_CACHE_ENABLED=true
+    qa_cache_enabled: bool = Field(default=False, alias="QA_CACHE_ENABLED")
     qa_cache_collection: str = Field(default="qa_cache", alias="QA_CACHE_COLLECTION")
-    qa_cache_ts_bucket_sec: int = Field(default=30, alias="QA_CACHE_TS_BUCKET_SEC")
+    # Playhead bucket width. 45s better matches multi-scene sitcom beats (>30s)
+    # without serving cross-context answers; override per title if needed.
+    qa_cache_ts_bucket_sec: int = Field(default=45, alias="QA_CACHE_TS_BUCKET_SEC")
     qa_cache_exact_ttl_sec: int = Field(default=7200, alias="QA_CACHE_EXACT_TTL_SEC")
     qa_cache_semantic_ttl_sec: int = Field(
         default=7200, alias="QA_CACHE_SEMANTIC_TTL_SEC"
     )
-    # Slightly open vs 0.93 so near-duplicate demo phrasing hits cache more often.
+    # Cosine floor for semantic near-dup hits. Tuned from 0.90 → 0.88 on labeled
+    # near-dup vs different pairs (see scripts/tune_qa_cache_threshold.py).
     qa_cache_semantic_threshold: float = Field(
-        default=0.90, alias="QA_CACHE_SEMANTIC_THRESHOLD"
+        default=0.88, alias="QA_CACHE_SEMANTIC_THRESHOLD"
     )
     qa_cache_semantic_top_k: int = Field(default=3, alias="QA_CACHE_SEMANTIC_TOP_K")
 
@@ -107,10 +111,11 @@ class Settings(BaseSettings):
     # Pilot: minimize tool hops / model reasoning / multimodal.
     # Production startup fails if this is false (legacy multi-tool path reachable).
     pilot_low_latency: bool = Field(default=True, alias="PILOT_LOW_LATENCY")
-    # Cap scenes + transcript size sent into the merged Gemini prompt (cost).
-    evidence_max_scenes: int = Field(default=3, alias="EVIDENCE_MAX_SCENES")
+    # Cap scenes + transcript size sent into the merged Gemini prompt (cost + TTFT).
+    # 2 scenes × 200 chars/field keeps spoiler-safe grounding while cutting prompt size.
+    evidence_max_scenes: int = Field(default=2, alias="EVIDENCE_MAX_SCENES")
     evidence_max_chars_per_field: int = Field(
-        default=280, alias="EVIDENCE_MAX_CHARS_PER_FIELD"
+        default=200, alias="EVIDENCE_MAX_CHARS_PER_FIELD"
     )
     # Short-lived reuse of BGE query vectors for similar/repeated questions.
     query_embedding_cache_ttl_sec: float = Field(
@@ -120,8 +125,9 @@ class Settings(BaseSettings):
         default=256, alias="QUERY_EMBEDDING_CACHE_MAX"
     )
     # Cap completion tokens for brief who/what lines (TTFT-friendly under Gemini 3).
+    # Pilot answers are ~1 short sentence; keep headroom for reasoning tokens first.
     llm_short_answer_max_tokens: int = Field(
-        default=256, alias="LLM_SHORT_ANSWER_MAX_TOKENS"
+        default=160, alias="LLM_SHORT_ANSWER_MAX_TOKENS"
     )
 
     # ── FFmpeg (subprocess) ───────────────────────────────────────────────────
@@ -195,11 +201,14 @@ class Settings(BaseSettings):
         default="why,how,explain,compare,motivation,relationship,theme,symbolism,foreshadow",
         alias="LLM_ESCALATION_KEYWORDS",
     )
+    # Global answer budget. Keep ≥512 so Gemini 3 reasoning doesn't starve speech.
+    # Short who/what lines use LLM_SHORT_ANSWER_MAX_TOKENS via _answer_max_tokens.
     llm_max_tokens: int = Field(default=512, alias="LLM_MAX_TOKENS")
     # Tool-call JSON + multi-step needs more headroom than spoken answer size.
     llm_tool_max_tokens: int = Field(default=768, alias="LLM_TOOL_MAX_TOKENS")
     llm_temperature: float = Field(default=0.35, alias="LLM_TEMPERATURE")
     # LiteLLM/Gemini 3: lower thinking so max_tokens isn't all reasoning.
+    # Applied globally in LiteLLMCompletionClient — not overridden per persona.
     llm_reasoning_effort: str = Field(default="minimal", alias="LLM_REASONING_EFFORT")
     # Pilot cost instrumentation (USD per 1M tokens; not billing). Flash-lite class.
     llm_input_usd_per_mtok: float = Field(

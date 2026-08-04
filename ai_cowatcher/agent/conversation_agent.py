@@ -149,12 +149,13 @@ class ConversationAgent:
             question,
             settings=self._settings,
             completion=self._completion,
+            persona_id=persona.persona_id if persona is not None else None,
         )
         usage = decision.usage or TokenUsage.empty()
         if not decision.short_circuit:
             return None, usage
 
-        model = self._settings.conversation_fast_model
+        # Free path: static canned / silence only — never looks like a model call.
         reply = decision.reply
         if (
             decision.action in ("social", "off_topic")
@@ -167,8 +168,8 @@ class ConversationAgent:
         return (
             AgentAnswer(
                 text=reply,
-                model_tier="fast",
-                model_name=model,
+                model_tier="gate",
+                model_name="gate:free",
                 escalation_reason=decision.reason,
                 used_context=False,
                 prompt_tokens=usage.prompt_tokens if usage else None,
@@ -216,6 +217,7 @@ class ConversationAgent:
     ) -> AgentAnswer:
         persona, gender = self._resolve_persona(persona_id, companion_gender)
         latency = latency or AskLatencyTracker(path="ask")
+        latency.set_meta(persona_id=persona.persona_id)
         with latency.stage(STAGE_GATE):
             gated, gate_usage = self._gated_answer(question=question, persona=persona)
         if gated is not None:
@@ -235,6 +237,7 @@ class ConversationAgent:
                 companion_gender=gender,
             )
 
+        # Full multi-tool path only when pilot/merged is off (not silent persona fallthrough).
         tier_selection = self._tier_router.select_tier(question)
         tier_decision = tier_selection.decision
         usage = gate_usage.merge(tier_selection.usage or TokenUsage.empty())
@@ -264,6 +267,7 @@ class ConversationAgent:
                 tier_decision=tier_decision,
                 confident_title=confident_title,
                 search_title=search_title,
+                persona_id=persona.persona_id,
             )
             reason = tier_decision.reason
         usage = usage.merge(loop_usage)
@@ -297,6 +301,7 @@ class ConversationAgent:
         """Yield progressive status/token events and a final ``done`` event."""
         persona, gender = self._resolve_persona(persona_id, companion_gender)
         latency = latency or AskLatencyTracker(path="ask_stream")
+        latency.set_meta(persona_id=persona.persona_id)
         yield AskStreamEvent(type="status", message="Listening for intent…")
 
         with latency.stage(STAGE_GATE):
@@ -375,6 +380,7 @@ class ConversationAgent:
                 confident_title=confident_title,
                 search_title=search_title,
                 latency=latency,
+                persona_id=persona.persona_id,
             )
             reason = tier_decision.reason
         usage = usage.merge(loop_usage)
@@ -411,9 +417,9 @@ class ConversationAgent:
         raw_payload = [hit.to_tool_dict() for hit in hits]
         if not raw_payload:
             return [], "(no scene matches)"
-        max_scenes = int(getattr(self._settings, "evidence_max_scenes", 3) or 3)
+        max_scenes = int(getattr(self._settings, "evidence_max_scenes", 2) or 2)
         max_chars = int(
-            getattr(self._settings, "evidence_max_chars_per_field", 280) or 280
+            getattr(self._settings, "evidence_max_chars_per_field", 200) or 200
         )
         scene_evidence = scene_evidence_json(
             [raw_payload],
@@ -807,7 +813,7 @@ class ConversationAgent:
         """Pilot defaults favor TTFT: shorter caps for simple who/what lines."""
         base = int(self._settings.llm_max_tokens)
         short_cap = int(
-            getattr(self._settings, "llm_short_answer_max_tokens", 256) or 256
+            getattr(self._settings, "llm_short_answer_max_tokens", 160) or 160
         )
         q = (question or "").strip()
         if not q:
@@ -1119,9 +1125,10 @@ class ConversationAgent:
         confident_title: str | None = None,
         search_title: str | None = None,
         latency: AskLatencyTracker | None = None,
+        persona_id: str | None = None,
     ) -> Iterator[AskStreamEvent]:
         """Yield stream events; return value is (text, usage, used_context)."""
-        record_legacy_tool_path()
+        record_legacy_tool_path(persona_id=persona_id)
         messages = self._initial_messages(question, confident_title, search_title)
         usage = TokenUsage.empty()
         used_context = False
@@ -1237,8 +1244,9 @@ class ConversationAgent:
         tier_decision,
         confident_title: str | None = None,
         search_title: str | None = None,
+        persona_id: str | None = None,
     ) -> tuple[str, TokenUsage | None, bool]:
-        record_legacy_tool_path()
+        record_legacy_tool_path(persona_id=persona_id)
         messages = self._initial_messages(question, confident_title, search_title)
         usage = TokenUsage.empty()
         used_context = False

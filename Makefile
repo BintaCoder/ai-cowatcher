@@ -1,6 +1,14 @@
 .PHONY: up up-core down logs install api api-dev ingest worker health bench-ask
 
+# Q&A answer cache (host API via `make api` / `make api-dev`; compose is infra only).
+# Default off for latency testing. Override on the command line:
+#   make api
+#   make api QA_CACHE_ENABLED=true
+#   make api-dev QA_CACHE_ENABLED=false
+QA_CACHE_ENABLED ?= false
+
 # Full stack including brokers (Kafka/RabbitMQ). Kafka uses apache/kafka (not Bitnami).
+# (QA_CACHE_ENABLED is ignored here — start the API with `make api QA_CACHE_ENABLED=...`.)
 up:
 	docker compose up -d
 
@@ -26,11 +34,13 @@ install:
 # Stable serve: one process. --reload forks a 2nd process and can OOM-kill when
 # BGE-M3 warms at startup (macOS reports "Killed: 9" / make exit).
 api:
-	TOKENIZERS_PARALLELISM=false .venv/bin/uvicorn ai_cowatcher.main:app --host 0.0.0.0 --port 8000
+	TOKENIZERS_PARALLELISM=false QA_CACHE_ENABLED=$(QA_CACHE_ENABLED) \
+		.venv/bin/uvicorn ai_cowatcher.main:app --host 0.0.0.0 --port 8000
 
 # Auto-reload for light code edits only (avoid with MOCK_MODE=false + BGE warm).
 api-dev:
-	TOKENIZERS_PARALLELISM=false .venv/bin/uvicorn ai_cowatcher.main:app --host 0.0.0.0 --port 8000 --reload
+	TOKENIZERS_PARALLELISM=false QA_CACHE_ENABLED=$(QA_CACHE_ENABLED) \
+		.venv/bin/uvicorn ai_cowatcher.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Offline ingest via the venv interpreter (most reliable; does not depend on PATH scripts).
 # Usage:

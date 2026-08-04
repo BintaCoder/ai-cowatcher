@@ -498,6 +498,9 @@ def should_cache_answer(
     reason = (escalation_reason or "").lower()
     if "filler" in reason or reason.endswith(":ignore") or "ignore_" in reason:
         return False
+    if "gate:social" in reason or reason == "gate:social":
+        # Canned social is persona-static; skip cache pollution / false "miss" noise.
+        return False
     if "navigate" in reason:
         return False
     # Avoid poisoning with soft refusals
@@ -514,7 +517,7 @@ def build_qa_cache(
     qdrant_client: QdrantClient | None = None,
     exact_kv: ExactKV | None = None,
 ) -> QACache | None:
-    if not getattr(settings, "qa_cache_enabled", True):
+    if not getattr(settings, "qa_cache_enabled", False):
         return None
 
     if exact_kv is None:

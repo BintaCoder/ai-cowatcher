@@ -575,7 +575,7 @@ def build_viewing_session(
         object_store=objects,
     )
     cache = qa_cache
-    if cache is None and getattr(settings, "qa_cache_enabled", True):
+    if cache is None and getattr(settings, "qa_cache_enabled", False):
         client = getattr(qdrant, "_client", None)
         cache = build_qa_cache(settings, embedder=embedder, qdrant_client=client)
     return ViewingSession(

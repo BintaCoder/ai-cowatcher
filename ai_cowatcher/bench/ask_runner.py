@@ -129,11 +129,9 @@ def post_ask(
         "current_ts": current_ts,
         "question": question,
         "user_id": user_id,
+        "persona_id": persona_id or DEFAULT_PERSONA_ID,
+        "companion_gender": companion_gender or "neutral",
     }
-    if persona_id:
-        payload["persona_id"] = persona_id
-    if companion_gender:
-        payload["companion_gender"] = companion_gender
     url = f"{base_url.rstrip('/')}/ask"
     attempts = max(1, retries + 1)
     last_error: Exception | None = None
@@ -409,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         f"run_id={run_id} title={title_ref!r} title_id={title_id} n={len(samples)} "
         f"personas={persona_ids} companion_gender={gender} "
         f"duration_sec={duration_sec:.1f} mock_mode={settings.mock_mode} "
-        f"qa_cache_enabled={getattr(settings, 'qa_cache_enabled', True)}"
+        f"qa_cache_enabled={getattr(settings, 'qa_cache_enabled', False)}"
     )
     print(f"base_url={args.base_url} (questions: {questions_path})")
 

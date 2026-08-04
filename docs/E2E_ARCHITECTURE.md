@@ -265,8 +265,8 @@ Characters (Neo4j): appearances / relationships already “known” by `current_
 
 Two-tier (`QA_CACHE_*`):
 
-1. **Exact** — Redis or in-memory, key = title + question + **30s playhead bucket**  
-2. **Semantic** — Qdrant collection `qa_cache`  
+1. **Exact** — Redis or in-memory, key = title + question + **persona_id** + playhead bucket (`QA_CACHE_TS_BUCKET_SEC`, default **45s**)  
+2. **Semantic** — Qdrant collection `qa_cache`, filtered by title + bucket + **persona_id**, cosine ≥ `QA_CACHE_SEMANTIC_THRESHOLD` (default **0.88**) 
 
 Skips cache for filler/navigate/empty/“not sure”. Use for scripted demo lines.
 
@@ -416,7 +416,7 @@ Wall clock often **~2–6s** with flash-lite / network variance (not 15s multi-t
 ### Stage breakdown (instrumented)
 
 Each `/ask` and `/ask/stream` emits a structured **`ask_latency_stages`** JSON log and
-Prometheus histogram `cowatcher_ask_stage_duration_seconds{stage=…}` for:
+Prometheus histogram `cowatcher_ask_stage_duration_seconds{stage=…, persona_id=…}` for:
 
 | Stage | Meaning |
 |-------|---------|
@@ -453,12 +453,12 @@ Related stream logs: `llm_stream_request` → `llm_stream_first_token` →
 | Playhead retrieve (skip BGE) | “on screen / who is that / what just happened” → Qdrant playhead |
 | Query embed TTL reuse | `QUERY_EMBEDDING_CACHE_TTL_SEC`, `QUERY_EMBEDDING_CACHE_MAX` |
 | No multimodal on hot path | `MULTIMODAL_SCENE_AUDIO_ENABLED=false`; stream never starts MM while texting |
-| Token headroom / TTFT | `LLM_MAX_TOKENS`, `LLM_SHORT_ANSWER_MAX_TOKENS`, `LLM_REASONING_EFFORT=minimal` |
-| Evidence trim | `EVIDENCE_MAX_SCENES`, `EVIDENCE_MAX_CHARS_PER_FIELD` |
+| Token headroom / TTFT | `LLM_MAX_TOKENS` (≥512 for Gemini 3 reasoning), `LLM_SHORT_ANSWER_MAX_TOKENS` (default 160), `LLM_REASONING_EFFORT=minimal` (global, all personas) |
+| Evidence trim | `EVIDENCE_MAX_SCENES` (default 2), `EVIDENCE_MAX_CHARS_PER_FIELD` (default 200) |
 | Fast model | e.g. `gemini/gemini-3.5-flash-lite` |
 | Warm BGE + LiteLLM HTTP pool | `make api` **without** `--reload`; lifespan installs shared httpx client |
-| QA cache | `QA_CACHE_ENABLED=true`; demos: `cowatcher-warm-qa-cache` |
-| Gate free-hit metrics | `cowatcher_utterance_gate_total{outcome=free\|agent\|prompt_llm}` + log `utterance_gate` |
+| QA cache | `QA_CACHE_ENABLED=false` by default; toggle via `make api QA_CACHE_ENABLED=true|false`; demos: `cowatcher-warm-qa-cache`; threshold/bucket: `QA_CACHE_SEMANTIC_THRESHOLD`, `QA_CACHE_TS_BUCKET_SEC` |
+| Gate free-hit metrics | `cowatcher_utterance_gate_total{outcome=free\|agent\|prompt_llm, action=…, persona_id=…}` + log `utterance_gate` |
 | Offload | `asyncio.to_thread` for agent work |
 
 ### Gate free-hit rate
@@ -476,10 +476,15 @@ skips BGE entirely).
 ### Demo warm-cache
 
 ```bash
-# Pre-seed exact + semantic QA answers for scripted walkthroughs
+# Pre-seed exact + semantic QA answers for scripted + common real-pattern questions
 cowatcher-warm-qa-cache
 # or: PYTHONPATH=. python -m ai_cowatcher.qa.warm_cache
+# Seed from quality-review / bench question set:
+PYTHONPATH=. python -m ai_cowatcher.qa.warm_cache \
+  --question-set benchmarks/friends_ross_questions.json --title-id friends_ross --dry-run
 ```
+
+See [CACHE_AND_TOKEN_TRIM.md](./CACHE_AND_TOKEN_TRIM.md) for threshold tuning, evidence candidates, and the LLM floor statement.
 
 ---
 
@@ -514,11 +519,11 @@ Full reference: `.env.example`.
 | Ask (legacy tools + multimodal) | Multiple Gemini calls + optional audio tokens |
 | Diarization / BGE / Whisper | Local electricity only |
 
-**Hard path (production):** `PILOT_LOW_LATENCY=true` + `UTTERANCE_GATE_STRATEGY=merged`. Startup raises if either is wrong in `APP_ENV=production`. Metric `cowatcher_legacy_tool_path_total` counts any multi-tool loop use.
+**Hard path (production):** `PILOT_LOW_LATENCY=true` + `UTTERANCE_GATE_STRATEGY=merged`. Startup raises if either is wrong in `APP_ENV=production`. Metric `cowatcher_legacy_tool_path_total{persona_id=…}` counts any multi-tool loop use (should stay 0 on the pilot path).
 
-**Evidence trim:** `EVIDENCE_MAX_SCENES` (default 3) and `EVIDENCE_MAX_CHARS_PER_FIELD` (default 280) cap payload into the merged prompt. Offline token delta: `PYTHONPATH=. python scripts/bench_evidence_cost.py`.
+**Evidence trim:** `EVIDENCE_MAX_SCENES` (default 2) and `EVIDENCE_MAX_CHARS_PER_FIELD` (default 200) cap payload into the merged prompt. Offline token delta: `PYTHONPATH=. python scripts/bench_evidence_cost.py --candidates 3:280,2:200,2:160`.
 
-**QA cache:** threshold default `0.90`; hits via `cowatcher_qa_cache_hit_total{source=exact|semantic}` / `…_miss_total`. Warm demos: `cowatcher-warm-qa-cache` (or `python -m ai_cowatcher.qa.warm_cache`).
+**QA cache:** threshold default `0.88`, bucket default `45s`; hits via `cowatcher_qa_cache_hit_total{source=exact|semantic}` / `…_miss_total`. Hit-rate panel is on the primary **AI Co-watcher Pilot** Grafana board. Warm: `cowatcher-warm-qa-cache` (or `python -m ai_cowatcher.qa.warm_cache`). Threshold sweep: `scripts/tune_qa_cache_threshold.py`.
 
 **LLM cost logs:** structured `llm_call_cost` + Prometheus `cowatcher_llm_*_tokens_total` and `cowatcher_llm_estimated_cost_usd_total`. Session soft budget: `SESSION_COST_BUDGET_USD` (default $0.50).
 
@@ -550,7 +555,8 @@ Confirm live Gemini rates on [ai.google.dev pricing](https://ai.google.dev/prici
 make up-core          # core deps without Kafka if unused
 make install          # venv + editable package
 make ingest TITLE=… VIDEO=… FORCE=1
-make api              # single process, warm BGE
+make api              # single process, warm BGE; QA cache off
+# make api QA_CACHE_ENABLED=true
 # open http://localhost:8000/watch
 ```
 

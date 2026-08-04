@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -9,7 +11,12 @@
     {
       "title": "/ask p95 latency",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(cowatcher_ask_request_duration_seconds_bucket[5m])) by (le))",
@@ -21,25 +28,46 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s", "custom": { "drawStyle": "line" } }
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line"
+          }
+        }
       }
     },
     {
       "title": "/ask error rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "targets": [
         {
           "expr": "sum(rate(cowatcher_ask_requests_total{status=\"error\"}[5m])) / sum(rate(cowatcher_ask_requests_total[5m]))",
           "legendFormat": "error rate"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      }
     },
     {
       "title": "Model tier split",
       "type": "piechart",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
       "targets": [
         {
           "expr": "sum(increase(cowatcher_ask_model_tier_total[1h])) by (tier)",
@@ -50,43 +78,75 @@
     {
       "title": "Don't-know rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
       "targets": [
         {
           "expr": "sum(rate(cowatcher_ask_dont_know_total[15m])) / sum(rate(cowatcher_ask_requests_total{status=\"success\"}[15m]))",
           "legendFormat": "dont_know_rate"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
     },
     {
       "title": "/ask request rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
       "targets": [
         {
           "expr": "sum(rate(cowatcher_ask_requests_total[5m])) by (status)",
           "legendFormat": "{{status}}"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "reqps" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      }
     },
     {
       "title": "Tool call p95 latency",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(cowatcher_tool_call_duration_seconds_bucket[5m])) by (le, tool))",
           "legendFormat": "{{tool}}"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
     },
     {
       "title": "Tool calls / min",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
       "targets": [
         {
           "expr": "sum(rate(cowatcher_tool_calls_total[5m])) by (tool) * 60",
@@ -97,19 +157,33 @@
     {
       "title": "Storage query p95",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(cowatcher_storage_query_duration_seconds_bucket[5m])) by (le, backend, operation))",
           "legendFormat": "{{backend}}/{{operation}}"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
     },
     {
       "title": "Ingest job outcomes",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
       "targets": [
         {
           "expr": "sum(rate(cowatcher_ingest_jobs_total[15m])) by (status)",
@@ -120,7 +194,12 @@
     {
       "title": "Ingest queue depth",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
       "targets": [
         {
           "expr": "cowatcher_ingest_queue_depth",
@@ -131,21 +210,101 @@
     {
       "title": "Ingest job duration p95",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(cowatcher_ingest_job_duration_seconds_bucket[1h])) by (le))",
           "legendFormat": "p95"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "QA cache hit rate",
+      "description": "Primary cache-health signal. hit_rate = hits / (hits+misses). Split by exact|semantic hit counters available below.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(cowatcher_qa_cache_hit_total[5m])) / clamp_min(sum(rate(cowatcher_qa_cache_hit_total[5m])) + sum(rate(cowatcher_qa_cache_miss_total[5m])), 1e-9)",
+          "legendFormat": "hit_rate"
+        },
+        {
+          "expr": "sum(rate(cowatcher_qa_cache_hit_total{source=\"exact\"}[5m])) / clamp_min(sum(rate(cowatcher_qa_cache_hit_total[5m])) + sum(rate(cowatcher_qa_cache_miss_total[5m])), 1e-9)",
+          "legendFormat": "exact_share"
+        },
+        {
+          "expr": "sum(rate(cowatcher_qa_cache_hit_total{source=\"semantic\"}[5m])) / clamp_min(sum(rate(cowatcher_qa_cache_hit_total[5m])) + sum(rate(cowatcher_qa_cache_miss_total[5m])), 1e-9)",
+          "legendFormat": "semantic_share"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line"
+          }
+        }
+      }
+    },
+    {
+      "title": "QA cache hits vs misses",
+      "description": "cowatcher_qa_cache_hit_total{source=exact|semantic} vs cowatcher_qa_cache_miss_total",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(cowatcher_qa_cache_hit_total[5m])) by (source)",
+          "legendFormat": "hit:{{source}}"
+        },
+        {
+          "expr": "sum(rate(cowatcher_qa_cache_miss_total[5m]))",
+          "legendFormat": "miss"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line"
+          }
+        }
+      }
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["cowatcher", "pilot"],
-  "templating": { "list": [] },
-  "time": { "from": "now-6h", "to": "now" },
+  "tags": [
+    "cowatcher",
+    "pilot"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "AI Co-watcher Pilot",
