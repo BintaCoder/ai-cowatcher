@@ -23,6 +23,7 @@ router = APIRouter(tags=["watch"])
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 _WATCH_HTML = _WEB_DIR / "watch.html"
+# Legacy RMS helpers (compat route only). /watch loads SmartAIDucker instead.
 _CONVERSATION_DUCKING_JS = _WEB_DIR / "conversation_ducking.js"
 _SMART_AI_DUCKER_JS = _WEB_DIR / "smart_ai_ducker.js"
 

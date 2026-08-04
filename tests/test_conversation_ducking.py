@@ -1,4 +1,9 @@
-"""Unit tests for conversation-aware ducking helpers (prompt 7)."""
+"""Unit tests for conversation-aware ducking helpers (prompt 7).
+
+Note: /watch now loads SmartAIDucker (`smart_ai_ducker.js`). This module still
+covers the deprecated RMS helper asset and asserts the watch page no longer
+wires amplitude VAD (`processVadRms`).
+"""
 
 from __future__ import annotations
 
