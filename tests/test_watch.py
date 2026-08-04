@@ -85,6 +85,8 @@ def test_watch_page_served(watch_client):
     assert "/watch/conversation_ducking.js" in response.text
     # Auto-listen remains opt-in for latency isolation tests.
     assert "cowatcher.auto_listen_mic" in response.text
+    assert 'id="holdTalkBtn"' in response.text
+    assert "startPushToTalk" in response.text
 
 
 def test_titles_endpoint_lists_completed(watch_client):

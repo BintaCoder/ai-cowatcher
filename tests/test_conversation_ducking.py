@@ -72,6 +72,11 @@ def test_target_gains_duck_and_ambient():
           reasons: ["ask"],
           vadSpeechActive: false,
         });
+        const ptt = duck.targetGains({
+          enabled: true,
+          reasons: ["ptt"],
+          vadSpeechActive: false,
+        });
         const vad = duck.targetGains({
           enabled: true,
           reasons: [],
@@ -87,11 +92,12 @@ def test_target_gains_duck_and_ambient():
           reasons: ["ask"],
           vadSpeechActive: true,
         });
-        return { hard, vad, ambient, off, cfg: duck.DUCK_CONFIG };
+        return { hard, ptt, vad, ambient, off, cfg: duck.DUCK_CONFIG };
         """
     )
     assert out["hard"]["program"] == pytest.approx(out["cfg"]["DUCK_GAIN"])
     assert out["hard"]["tts"] == pytest.approx(out["cfg"]["DUCK_GAIN"])
+    assert out["ptt"]["program"] == pytest.approx(out["cfg"]["DUCK_GAIN"])
     assert out["vad"]["program"] == pytest.approx(out["cfg"]["DUCK_GAIN"])
     assert out["ambient"]["program"] == pytest.approx(out["cfg"]["AMBIENT_GAIN"])
     assert out["ambient"]["tts"] == pytest.approx(1.0)
@@ -148,5 +154,8 @@ def test_watch_serves_ducking_helpers_and_session_hooks():
     # Auto-listen stays off by default (testing-friendly).
     assert 'id="autoListenMic"' in body
     assert "cowatcher.auto_listen_mic" in body
+    assert 'id="holdTalkBtn"' in body
+    assert "startPushToTalk" in body
+    assert 'setDuckReason("ptt"' in body or "setDuckReason(\"ptt\"" in body
     # Must not barge-in cancel TTS solely for VAD ducking.
     assert "does not cancel speech" in body or "Does not cancel" in body

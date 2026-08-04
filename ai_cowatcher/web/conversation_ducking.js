@@ -106,6 +106,7 @@
       reasonSet.has("ask")
       || reasonSet.has("tts")
       || reasonSet.has("speech")
+      || reasonSet.has("ptt")
       || Boolean(opts.vadSpeechActive);
     let program = 1;
     let tts = 1;
