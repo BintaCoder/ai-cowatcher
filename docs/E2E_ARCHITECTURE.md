@@ -17,7 +17,7 @@ AI Co-watcher is a **spoiler-safe TV companion**. The pilot prioritizes a **demo
    Detect scenes → full-title audio → ASR (Whisper) → optional speaker diarization → faces → vision captions → **per-scene WAV clips** → BGE-M3 embed → **PostgreSQL + Qdrant** → optional Neo4j character graph + knowledge + **TMDB cast cache** on the title.
 
 2. **Real-time Q&A (per utterance)**  
-   Browser **wake-word STT** (“Hey …”) or typed question → utterance gate → **pilot path: `PILOT_LOW_LATENCY` / `merged`** (one scene retrieve + one streamed Gemini answer) → optional TTS.  
+   Browser **Hold to talk**, optional **wake-word STT** (“Hey …”), or typed question → utterance gate → **pilot path: `PILOT_LOW_LATENCY` / `merged`** (one scene retrieve + one streamed Gemini answer) → optional TTS.  
    Full multi-tool agent remains available when pilot low-latency is off.
 
 3. **Navigation**  
@@ -25,7 +25,7 @@ AI Co-watcher is a **spoiler-safe TV companion**. The pilot prioritizes a **demo
 
 4. **Watch UI**  
    `GET /watch` — play video (Range stream), title dropdown (completed + on-disk paths only),
-   VAD-driven conversation gain duck (program + TTS), optional ambient mic with **Hey** wake word, SSE answers.
+   **state-driven** program-audio ducking (`SmartAIDucker`), **Hold to talk** (primary) plus optional ambient mic with **Hey** wake word, SSE answers.
 
 ### Design priorities (pilot)
 
@@ -35,7 +35,7 @@ AI Co-watcher is a **spoiler-safe TV companion**. The pilot prioritizes a **demo
 | Models | Current Gemini 3.x IDs (`gemini-3.5-flash-lite` / `gemini-3.6-flash`); 2.0/2.5 **retired for new keys** |
 | Multimodal audio | **Off by default** (`MULTIMODAL_SCENE_AUDIO_ENABLED=false`) — text caption/transcript is enough for demos |
 | Diarization | **Optional**; missing `pyannote` → empty speakers, ingest continues |
-| Voice UX | **Hey** wake word so program audio is not treated as the user |
+| Voice UX | **Hold to talk** primary; optional **Hey** wake word when Auto listen is on (off by default) so program audio is not treated as the user |
 
 ---
 
@@ -46,9 +46,9 @@ flowchart TB
     subgraph Client["Viewer (browser)"]
         WATCH["GET /watch"]
         VIDEO["HTML5 video\nH.264+AAC recommended"]
-        STT["Web Speech API\nHey wake word"]
-        DUCK["VAD + gain duck\n(program + TTS)"]
-        TTS["SpeechSynthesis\n(volume duck)"]
+        STT["Web Speech API\nHold to talk · optional Hey"]
+        DUCK["SmartAIDucker\nstate GainNode duck"]
+        TTS["SpeechSynthesis\n(Gemini TTS hooks)"]
     end
 
     subgraph API["FastAPI + Uvicorn"]
@@ -98,6 +98,9 @@ flowchart TB
 
     WATCH --> VIDEO & STT & DUCK & TTS
     WATCH --> ASKSTREAM & NAV & TITLES
+    STT -->|"onUserSpeechStart/End"| DUCK
+    TTS -->|"onGeminiSpeechStart/End"| DUCK
+    VIDEO -->|"MediaElementSource → GainNode"| DUCK
     ASK & ASKSTREAM --> CACHE
     CACHE -->|miss| GATE
     GATE --> MERGED
@@ -287,14 +290,20 @@ Skips cache for filler/navigate/empty/“not sure”. Use for scripted demo line
 | Feature | Behavior |
 |---------|----------|
 | Titles | `GET /titles` — **completed**, non-ephemeral (`nav-*` / `demo-web*` filtered), **video file still on disk** |
-| Voice | Optional continuous STT (`Auto listen`, **off by default**); only phrases with **Hey** (or Hay) become questions |
-| Persistent audio | Once per session: `getUserMedia` (echoCancellation) + one `AudioContext`; never torn down for ducking/TTS |
-| Conversation duck | AnalyserNode VAD on the long-lived mic drives smooth **GainNode** ramps on program audio (~15%) + `SpeechSynthesisUtterance.volume` for answers; hangover ~500ms |
-| Program bleed | Mild ambient duck while listening; wake-word gate ignores show dialogue without **Hey** |
-| Duck checkbox | Enables conversation-awareness duck; disable for unducked program audio |
+| Voice (primary) | **Hold to talk** — press-and-hold; no wake word; program ducks immediately on press |
+| Voice (optional) | Continuous STT (`Auto listen`, **off by default**); only phrases with **Hey** (or Hay) become questions |
+| Persistent audio graph | Once per session: one `AudioContext` @ **48 kHz** + `<video>` → `GainNode`; never torn down for ducking/TTS |
+| Conversation duck | **`SmartAIDucker`** — **state-driven** (not mic RMS/amplitude). Duck when user **or** Gemini (or ask pipeline) is active; recover only after **1.5s** continuous silence (+ optional Bluetooth pad) |
+| Multi-tier gains | User / Hold-to-talk → **20%** instant cut (~0.02s linear); Gemini TTS → **5%** deep duck (~0.2s linear); recover → **100%** via `setTargetAtTime` (~0.6s) |
+| Barge-in | User speaking while Gemini talks snaps back to **20%** instantly; **does not cancel** TTS — only program gain changes |
+| AirPods / BT | Dual `setSinkId` (`bindToAirPods`), BT-friendly mic constraints (AEC/NS on, AGC off), recovery hold padded ~150ms for transport delay |
+| Program bleed | Wake-word gate ignores show dialogue without **Hey**; no ambient “listening” duck (that false-triggered on room noise) |
+| Duck checkbox | Enables `SmartAIDucker`; disable for unducked program audio |
 | Stream | SSE: `status`, `tool_*`, `intent`, `token`, `done` / `error` |
 | Video codec | Prefer H.264+AAC for audio playback |
-| Helpers | `GET /watch/conversation_ducking.js` — pure VAD/gain target helpers |
+| Assets | `GET /watch/smart_ai_ducker.js` — production ducker; `conversation_ducking.js` deprecated (RMS helpers, not loaded by `/watch`) |
+
+See [SMART_AI_DUCKER.md](./SMART_AI_DUCKER.md) for hooks, VAD wiring, and AirPods init.
 
 ---
 
@@ -395,6 +404,8 @@ qa_cache (exact + Qdrant semantic)
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/watch` | Watch + voice UI |
+| GET | `/watch/smart_ai_ducker.js` | State-driven program ducker (browser) |
+| GET | `/watch/conversation_ducking.js` | Deprecated RMS helpers (compat only) |
 | GET | `/titles` | Ready titles for dropdown |
 | GET | `/video/{title_id}` | HTTP Range stream |
 | POST | `/ask` | Full JSON answer |
@@ -597,7 +608,8 @@ make api              # single process, warm BGE; QA cache off
 | **Merged path** | One LLM: intent tag + answer |
 | **PILOT_LOW_LATENCY** | Force demo-friendly answer path |
 | **thought_signature** | Gemini 3 tool-call continuity field |
-| **Wake word** | “Hey” required for ambient voice asks |
+| **Wake word** | Optional with Auto listen; **Hold to talk** is the primary voice path |
+| **SmartAIDucker** | State hooks → GainNode; multi-tier 20%/5%; AirPods sink bind |
 | **cast_cache** | Title-level cast JSON from ingest |
 | **QA cache** | Exact/semantic skip of full agent |
 | **Warm session** | Embedder + agent deps built at lifespan |
@@ -606,6 +618,7 @@ make api              # single process, warm BGE; QA cache off
 
 ## 17. Related docs
 
+- [SMART_AI_DUCKER.md](./SMART_AI_DUCKER.md) — watch-page program ducking (hooks, AirPods, VAD)  
 - [OBSERVABILITY.md](./OBSERVABILITY.md) — metrics / alerts  
 - [README.md](../README.md) — quick start  
 - `.env.example` — env dictionary  
@@ -615,8 +628,8 @@ make api              # single process, warm BGE; QA cache off
 ## 18. Print notes
 
 - PDF-friendly; Mermaid needs a renderer (GitHub, VS Code, or mermaid-cli).  
-- One-pager: **§1**, **§2**, **§4.1–4.2**, **§10**.
+- One-pager: **§1**, **§2**, **§4.1–4.2**, **§5**, **§10**.
 
 ---
 
-*Aligned with the pilot codebase: merged/pilot-low-latency path, playhead retrieve, optional diarization, cast ingest cache, QA cache, wake-word watch UI, Gemini 3 thought signatures and model IDs, multimodal opt-in. Pricing is indicative only.*
+*Aligned with the pilot codebase: merged/pilot-low-latency path, playhead retrieve, optional diarization, cast ingest cache, QA cache, Hold-to-talk + SmartAIDucker watch UI, Gemini 3 thought signatures and model IDs, multimodal opt-in. Pricing is indicative only.*
