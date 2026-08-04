@@ -49,18 +49,29 @@ Useful flags:
 | `--base-url` | `http://localhost:8000` | API |
 | `--n` | `5` | Sample size (from bank of 20) |
 | `--seed` | (random) | Reproducible sample |
+| `--persona-id` | `DEFAULT_PERSONA_ID` (easygoing_friend) | Companion tone (QA-cache key includes this) |
+| `--companion-gender` | `neutral` | `male` \| `female` \| `neutral` (delivery / TTS hint) |
+| `--all-personas` | off | Replay the same n samples for every shipped persona |
 | `--questions-file` | `benchmarks/friends_ross_questions.json` | Question bank |
 | `--duration-sec` | auto | Override if ffprobe/DB unavailable |
 | `--allow-mock` | off | Permit `MOCK_MODE=true` |
+
+```bash
+# Witty + female voice preference
+make bench-ask PERSONA=witty_friend GENDER=female SEED=42
+
+# Tone comparison: same 3 Qs × all personas (watch Gemini spend)
+make bench-ask ALL_PERSONAS=1 N=3 SEED=7
+```
 
 Each run:
 
 1. Loads settings; exits if mock without `--allow-mock`
 2. Resolves video duration (ffprobe on catalog video → max scene `end_ts` → `--duration-sec`)
-3. Picks 5 random questions × random playhead in `[0, duration]`
-4. `POST /ask` with live `current_ts`
+3. Picks n random questions × random playhead in `[0, duration]`
+4. `POST /ask` with live `current_ts`, **`persona_id`**, **`companion_gender`**
 5. Derives `cache_source` from response `model_name` / tier
-6. Inserts Postgres + appends JSONL; prints a summary table
+6. Inserts Postgres + appends JSONL (both store persona/gender); prints a summary table
 
 ## Cache source derivation
 
@@ -92,7 +103,7 @@ After changing provisioning, restart Grafana (`docker compose restart grafana`).
 ### Manual SQL check
 
 ```sql
-SELECT question_id, current_ts, latency_ms, cache_source, LEFT(answer, 80)
+SELECT question_id, persona_id, companion_gender, current_ts, latency_ms, cache_source, LEFT(answer, 80)
 FROM bench_ask_result
 ORDER BY created_at DESC
 LIMIT 20;

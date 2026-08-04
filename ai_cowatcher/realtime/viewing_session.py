@@ -19,6 +19,7 @@ from ai_cowatcher.observability.ask_latency import (
     AskLatencyTracker,
 )
 from ai_cowatcher.observability.ask_telemetry import AskRecord, is_dont_know_answer, record_ask_request
+from ai_cowatcher.personas.loader import normalize_companion_gender, resolve_persona_id
 from ai_cowatcher.providers import mock
 from ai_cowatcher.providers.real import BgeM3Embedder
 from ai_cowatcher.retrieval.cast_lookup import (
@@ -93,6 +94,10 @@ class ViewingSession:
         self._qa_cache = qa_cache
         self._title_display_names: dict[str, str | None] = {}
 
+    def _resolve_persona_id(self, persona_id: str | None) -> str:
+        default = getattr(self._settings, "default_persona_id", None) or "easygoing_friend"
+        return resolve_persona_id(persona_id, default_id=default)
+
     def _lookup_title_display_name(self, title_id: str) -> str | None:
         if title_id in self._title_display_names:
             return self._title_display_names[title_id]
@@ -131,12 +136,19 @@ class ViewingSession:
         )
 
     def _cache_lookup(
-        self, *, title_id: str, current_ts: float, question: str
+        self,
+        *,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        persona_id: str = "",
     ):
         if self._qa_cache is None:
             return None
         try:
-            return self._qa_cache.lookup(title_id, current_ts, question)
+            return self._qa_cache.lookup(
+                title_id, current_ts, question, persona_id=persona_id
+            )
         except Exception:  # noqa: BLE001
             logger.exception("QA cache lookup failed")
             return None
@@ -152,6 +164,7 @@ class ViewingSession:
         skip_memory: bool,
         escalation_reason: str | None,
         navigate: bool = False,
+        persona_id: str = "",
     ) -> None:
         if self._qa_cache is None:
             return
@@ -172,6 +185,7 @@ class ViewingSession:
                 question_embedding=getattr(
                     self._qa_cache, "last_query_embedding", None
                 ),
+                persona_id=persona_id,
             )
         except Exception:  # noqa: BLE001
             logger.exception("QA cache store failed")
@@ -184,13 +198,24 @@ class ViewingSession:
         question: str,
         user_id: str,
         persist_memory: bool = True,
+        persona_id: str | None = None,
+        companion_gender: str | None = None,
     ) -> AskResult:
+        resolved_persona = self._resolve_persona_id(persona_id)
+        gender = normalize_companion_gender(companion_gender)
         latency = AskLatencyTracker(path="ask")
-        latency.set_meta(title_id=title_id, user_id=user_id)
+        latency.set_meta(
+            title_id=title_id,
+            user_id=user_id,
+            persona_id=resolved_persona,
+        )
         started = time.perf_counter()
         with latency.stage(STAGE_CACHE_LOOKUP):
             hit = self._cache_lookup(
-                title_id=title_id, current_ts=current_ts, question=question
+                title_id=title_id,
+                current_ts=current_ts,
+                question=question,
+                persona_id=resolved_persona,
             )
         query_embedding = None
         if hit is None and self._qa_cache is not None:
@@ -254,6 +279,8 @@ class ViewingSession:
             title_display_name=title_display_name,
             latency=latency,
             query_embedding=query_embedding,
+            persona_id=resolved_persona,
+            companion_gender=gender,
         )
         latency_ms = (time.perf_counter() - started) * 1000.0
         latency.set_meta(
@@ -296,6 +323,7 @@ class ViewingSession:
             speak=answer.speak,
             skip_memory=answer.skip_memory,
             escalation_reason=answer.escalation_reason,
+            persona_id=resolved_persona,
         )
 
         return AskResult(
@@ -323,10 +351,18 @@ class ViewingSession:
         question: str,
         user_id: str,
         persist_memory: bool = True,
+        persona_id: str | None = None,
+        companion_gender: str | None = None,
     ) -> Iterator[AskStreamEvent]:
         """Yield AskStreamEvent objects; records telemetry and optional memory on done."""
+        resolved_persona = self._resolve_persona_id(persona_id)
+        gender = normalize_companion_gender(companion_gender)
         latency = AskLatencyTracker(path="ask_stream")
-        latency.set_meta(title_id=title_id, user_id=user_id)
+        latency.set_meta(
+            title_id=title_id,
+            user_id=user_id,
+            persona_id=resolved_persona,
+        )
         started = time.perf_counter()
 
         # SSE status as early as possible (before any work that might block).
@@ -334,7 +370,10 @@ class ViewingSession:
 
         with latency.stage(STAGE_CACHE_LOOKUP):
             hit = self._cache_lookup(
-                title_id=title_id, current_ts=current_ts, question=question
+                title_id=title_id,
+                current_ts=current_ts,
+                question=question,
+                persona_id=resolved_persona,
             )
         query_embedding = None
         if hit is None and self._qa_cache is not None:
@@ -405,6 +444,8 @@ class ViewingSession:
             title_display_name=title_display_name,
             latency=latency,
             query_embedding=query_embedding,
+            persona_id=resolved_persona,
+            companion_gender=gender,
         ):
             if event.type == "token" and event.text:
                 answer_text += event.text
@@ -470,6 +511,7 @@ class ViewingSession:
                     skip_memory=bool(event.skip_memory),
                     escalation_reason=event.escalation_reason,
                     navigate=bool(event.navigate),
+                    persona_id=resolved_persona,
                 )
                 yield done_event
             else:

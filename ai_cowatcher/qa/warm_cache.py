@@ -111,13 +111,29 @@ def warm(
     pairs: list[tuple[str, dict[str, Any]]],
     *,
     dry_run: bool = False,
+    persona_ids: list[str] | None = None,
 ) -> int:
     settings = get_settings()
     configure_litellm_env(settings)
+    from ai_cowatcher.personas.loader import list_personas, resolve_persona_id
+
+    default_persona = resolve_persona_id(
+        None, default_id=getattr(settings, "default_persona_id", None)
+    )
+    if persona_ids:
+        personas = [resolve_persona_id(p, default_id=default_persona) for p in persona_ids]
+    else:
+        # Seed every known persona so demo cache hits match watch UI selection.
+        personas = [p.persona_id for p in list_personas()] or [default_persona]
+
     if dry_run:
         for tid, row in pairs:
-            print(f"[dry-run] {tid} ts={row.get('current_ts')} q={row.get('question')!r}")
-        return len(pairs)
+            for pid in personas:
+                print(
+                    f"[dry-run] {tid} persona={pid} ts={row.get('current_ts')} "
+                    f"q={row.get('question')!r}"
+                )
+        return len(pairs) * len(personas)
 
     embedder = _build_embedder(settings)
     qdrant = QdrantSceneStore(settings)
@@ -137,9 +153,23 @@ def warm(
         if not question or not answer:
             logger.warning("Skipping incomplete pair for %s", tid)
             continue
-        cache.store(tid, current_ts, question, answer)
-        n += 1
-        print(f"Warm store: title={tid} ts={current_ts:.1f} q={question[:60]!r}")
+        # Optional per-row persona override; otherwise seed all personas.
+        row_personas = personas
+        if row.get("persona_id"):
+            row_personas = [
+                resolve_persona_id(str(row["persona_id"]), default_id=default_persona)
+            ]
+        for pid in row_personas:
+            # Light per-persona phrasing only when answer has no custom persona already.
+            seeded_answer = answer
+            if "persona_id" not in row and pid == "witty_friend" and "—" not in answer:
+                seeded_answer = answer.rstrip(".!") + " — neat beat."
+            cache.store(tid, current_ts, question, seeded_answer, persona_id=pid)
+            n += 1
+            print(
+                f"Warm store: title={tid} persona={pid} ts={current_ts:.1f} "
+                f"q={question[:60]!r}"
+            )
     return n
 
 
@@ -159,6 +189,12 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON file of pairs (list or title_id map)",
     )
     parser.add_argument(
+        "--persona-id",
+        action="append",
+        default=None,
+        help="Persona id to seed (repeatable). Default: all packaged personas.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print pairs only; do not write cache",
@@ -168,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=get_settings().log_level)
     try:
         pairs = load_pairs(args.file, args.title_id)
-        n = warm(pairs, dry_run=args.dry_run)
+        n = warm(pairs, dry_run=args.dry_run, persona_ids=args.persona_id)
     except SystemExit:
         raise
     except Exception:

@@ -38,6 +38,12 @@ from ai_cowatcher.bench.store import (
     insert_bench_result,
 )
 from ai_cowatcher.config import Settings, get_settings
+from ai_cowatcher.personas.loader import (
+    DEFAULT_PERSONA_ID,
+    list_personas,
+    normalize_companion_gender,
+    resolve_persona_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +115,8 @@ def post_ask(
     question: str,
     current_ts: float,
     user_id: str,
+    persona_id: str | None = None,
+    companion_gender: str | None = None,
     retries: int = 4,
     retry_base_sec: float = 2.0,
 ) -> tuple[dict[str, Any], float]:
@@ -116,12 +124,16 @@ def post_ask(
 
     Retries transient Gemini/API capacity errors (503 high demand, 429, etc.).
     """
-    payload = {
+    payload: dict[str, Any] = {
         "title_id": title_id,
         "current_ts": current_ts,
         "question": question,
         "user_id": user_id,
     }
+    if persona_id:
+        payload["persona_id"] = persona_id
+    if companion_gender:
+        payload["companion_gender"] = companion_gender
     url = f"{base_url.rstrip('/')}/ask"
     attempts = max(1, retries + 1)
     last_error: Exception | None = None
@@ -182,27 +194,32 @@ def _print_summary(rows: list[BenchResultRow]) -> None:
     if not rows:
         print("No results.")
         return
-    headers = ("qid", "ts", "cache", "ms", "kind", "answer")
+    headers = ("qid", "persona", "gender", "ts", "cache", "ms", "answer")
     print()
     print(
-        f"{headers[0]:<6} {headers[1]:>8} {headers[2]:<10} "
-        f"{headers[3]:>8} {headers[4]:<10} {headers[5]}"
+        f"{headers[0]:<6} {headers[1]:<18} {headers[2]:<8} "
+        f"{headers[3]:>8} {headers[4]:<10} {headers[5]:>8} {headers[6]}"
     )
-    print("-" * 100)
+    print("-" * 110)
     for r in rows:
         ans = (r.answer or r.error or "").replace("\n", " ")
-        if len(ans) > 60:
-            ans = ans[:57] + "..."
+        if len(ans) > 48:
+            ans = ans[:45] + "..."
         print(
-            f"{r.question_id:<6} {r.current_ts:8.1f} {r.cache_source:<10} "
-            f"{r.latency_ms:8.0f} {(r.kind or ''):<10} {ans}"
+            f"{r.question_id:<6} {(r.persona_id or ''):<18} "
+            f"{(r.companion_gender or ''):<8} {r.current_ts:8.1f} "
+            f"{r.cache_source:<10} {r.latency_ms:8.0f} {ans}"
         )
     caches = {}
     for r in rows:
         caches[r.cache_source] = caches.get(r.cache_source, 0) + 1
+    personas = {}
+    for r in rows:
+        personas[r.persona_id or ""] = personas.get(r.persona_id or "", 0) + 1
     latencies = [r.latency_ms for r in rows if r.status == "ok"]
-    print("-" * 100)
+    print("-" * 110)
     print(f"cache_source counts: {caches}")
+    print(f"persona_id counts: {personas}")
     if latencies:
         print(
             f"latency_ms: min={min(latencies):.0f} "
@@ -278,6 +295,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Pause between questions to reduce provider rate spikes",
+    )
+    p.add_argument(
+        "--persona-id",
+        default=None,
+        help=(
+            "Companion persona for this run "
+            f"(default: Settings.DEFAULT_PERSONA_ID / {DEFAULT_PERSONA_ID}). "
+            f"Known: {', '.join(p.persona_id for p in list_personas()) or DEFAULT_PERSONA_ID}"
+        ),
+    )
+    p.add_argument(
+        "--companion-gender",
+        default="neutral",
+        choices=["male", "female", "neutral"],
+        help="Companion / TTS gender hint (default: neutral)",
+    )
+    p.add_argument(
+        "--all-personas",
+        action="store_true",
+        help=(
+            "Run the same n samples once per shipped persona "
+            "(for tone comparison / cache isolation)"
+        ),
     )
     p.add_argument(
         "--skip-postgres",
@@ -356,8 +396,18 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
     )
 
+    default_persona = getattr(settings, "default_persona_id", None) or DEFAULT_PERSONA_ID
+    if args.all_personas:
+        persona_ids = [p.persona_id for p in list_personas()] or [default_persona]
+    else:
+        persona_ids = [
+            resolve_persona_id(args.persona_id, default_id=default_persona)
+        ]
+    gender = normalize_companion_gender(args.companion_gender) or "neutral"
+
     print(
         f"run_id={run_id} title={title_ref!r} title_id={title_id} n={len(samples)} "
+        f"personas={persona_ids} companion_gender={gender} "
         f"duration_sec={duration_sec:.1f} mock_mode={settings.mock_mode} "
         f"qa_cache_enabled={getattr(settings, 'qa_cache_enabled', True)}"
     )
@@ -365,84 +415,99 @@ def main(argv: list[str] | None = None) -> int:
 
     jsonl_path = Path(args.results_dir) / f"{run_id}.jsonl"
     rows: list[BenchResultRow] = []
+    ask_index = 0
 
     with httpx.Client(timeout=args.timeout) as client:
-        for i, sample in enumerate(samples):
-            if i > 0 and args.pause_sec > 0:
-                time.sleep(args.pause_sec)
-            qid = sample["id"]
-            qtext = sample["text"]
-            ts = float(sample["current_ts"])
-            kind = sample.get("kind") or ""
-            try:
-                data, latency_ms = post_ask(
-                    client,
-                    base_url=args.base_url,
-                    title_id=title_id,
-                    question=qtext,
-                    current_ts=ts,
-                    user_id=args.user_id,
-                    retries=args.retries,
-                    retry_base_sec=args.retry_base_sec,
-                )
-                model_name = str(data.get("model_name") or "")
-                model_tier = str(data.get("model_tier") or "")
-                escalation = str(data.get("escalation_reason") or "")
-                cache_source = parse_cache_source(
-                    model_name,
-                    model_tier=model_tier,
-                    escalation_reason=escalation,
-                )
-                answer = str(data.get("answer") or "")
-                skip_memory = bool(data.get("skip_memory", False))
-                used_context = cache_source in ("exact", "semantic")
-                row = BenchResultRow(
-                    run_id=run_id,
-                    title_id=title_id,
-                    question_id=qid,
-                    question=qtext,
-                    current_ts=ts,
-                    answer=answer,
-                    latency_ms=round(latency_ms, 2),
-                    cache_source=cache_source,
-                    model_name=model_name,
-                    model_tier=model_tier,
-                    used_context=used_context,
-                    skip_memory=skip_memory,
-                    kind=kind or None,
-                    status="ok",
-                )
-            except Exception as exc:  # noqa: BLE001 — record and continue
-                msg = str(exc).replace("\n", " ")
-                logger.error("ask failed for %s: %s", qid, msg[:300])
-                row = BenchResultRow(
-                    run_id=run_id,
-                    title_id=title_id,
-                    question_id=qid,
-                    question=qtext,
-                    current_ts=ts,
-                    answer="",
-                    latency_ms=-1.0,
-                    cache_source="none",
-                    model_name="",
-                    model_tier="",
-                    kind=kind or None,
-                    status="error",
-                    error=f"{type(exc).__name__}: {msg[:800]}",
-                )
+        for persona_id in persona_ids:
+            for sample in samples:
+                if ask_index > 0 and args.pause_sec > 0:
+                    time.sleep(args.pause_sec)
+                ask_index += 1
+                qid = sample["id"]
+                qtext = sample["text"]
+                ts = float(sample["current_ts"])
+                kind = sample.get("kind") or ""
+                try:
+                    data, latency_ms = post_ask(
+                        client,
+                        base_url=args.base_url,
+                        title_id=title_id,
+                        question=qtext,
+                        current_ts=ts,
+                        user_id=args.user_id,
+                        persona_id=persona_id,
+                        companion_gender=gender,
+                        retries=args.retries,
+                        retry_base_sec=args.retry_base_sec,
+                    )
+                    model_name = str(data.get("model_name") or "")
+                    model_tier = str(data.get("model_tier") or "")
+                    escalation = str(data.get("escalation_reason") or "")
+                    cache_source = parse_cache_source(
+                        model_name,
+                        model_tier=model_tier,
+                        escalation_reason=escalation,
+                    )
+                    answer = str(data.get("answer") or "")
+                    skip_memory = bool(data.get("skip_memory", False))
+                    used_context = cache_source in ("exact", "semantic")
+                    row = BenchResultRow(
+                        run_id=run_id,
+                        title_id=title_id,
+                        question_id=qid,
+                        question=qtext,
+                        current_ts=ts,
+                        answer=answer,
+                        latency_ms=round(latency_ms, 2),
+                        cache_source=cache_source,
+                        model_name=model_name,
+                        model_tier=model_tier,
+                        persona_id=persona_id,
+                        companion_gender=gender,
+                        used_context=used_context,
+                        skip_memory=skip_memory,
+                        kind=kind or None,
+                        status="ok",
+                    )
+                except Exception as exc:  # noqa: BLE001 — record and continue
+                    msg = str(exc).replace("\n", " ")
+                    logger.error(
+                        "ask failed for %s persona=%s: %s",
+                        qid,
+                        persona_id,
+                        msg[:300],
+                    )
+                    row = BenchResultRow(
+                        run_id=run_id,
+                        title_id=title_id,
+                        question_id=qid,
+                        question=qtext,
+                        current_ts=ts,
+                        answer="",
+                        latency_ms=-1.0,
+                        cache_source="none",
+                        model_name="",
+                        model_tier="",
+                        persona_id=persona_id,
+                        companion_gender=gender,
+                        kind=kind or None,
+                        status="error",
+                        error=f"{type(exc).__name__}: {msg[:800]}",
+                    )
 
-            rows.append(row)
-            record_bench_ask(
-                title_id=row.title_id,
-                question_id=row.question_id,
-                cache_source=row.cache_source,
-                latency_ms=max(0.0, row.latency_ms),
-            )
-            append_jsonl(jsonl_path, row)
+                rows.append(row)
+                record_bench_ask(
+                    title_id=row.title_id,
+                    question_id=row.question_id,
+                    cache_source=row.cache_source,
+                    latency_ms=max(0.0, row.latency_ms),
+                    persona_id=row.persona_id,
+                )
+                append_jsonl(jsonl_path, row)
 
-            if not args.skip_postgres and session_factory is not None:
-                with session_factory() as session:
-                    insert_bench_result(session, row)
+                if not args.skip_postgres and session_factory is not None:
+                    with session_factory() as session:
+                        insert_bench_result(session, row)
 
     _print_summary(rows)
     print(f"\nJSONL: {jsonl_path}")

@@ -13,7 +13,7 @@
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
       "targets": [
         {
-          "rawSql": "SELECT\n  created_at AS time,\n  run_id,\n  question_id AS \"Question ID\",\n  LEFT(question, 80) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead (s)\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency (ms)\",\n  cache_source AS \"Cache\",\n  model_tier AS \"Tier\",\n  LEFT(answer, 200) AS \"Answer\",\n  status\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\nORDER BY created_at DESC\nLIMIT 100;",
+          "rawSql": "SELECT\n  created_at AS time,\n  run_id,\n  persona_id AS \"Persona\",\n  companion_gender AS \"Gender\",\n  question_id AS \"Question ID\",\n  LEFT(question, 80) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead (s)\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency (ms)\",\n  cache_source AS \"Cache\",\n  model_tier AS \"Tier\",\n  LEFT(answer, 200) AS \"Answer\",\n  status\nFROM bench_ask_result\nWHERE created_at > NOW() - INTERVAL '1 hour'\nORDER BY created_at DESC\nLIMIT 100;",
           "format": "table",
           "refId": "A"
         }
@@ -27,7 +27,7 @@
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
       "targets": [
         {
-          "rawSql": "SELECT\n  question_id AS \"Question ID\",\n  LEFT(question, 100) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency ms\",\n  cache_source AS \"Cache\",\n  model_name AS \"Model\",\n  LEFT(answer, 240) AS \"Answer\"\nFROM bench_ask_result\nWHERE run_id = (\n  SELECT run_id FROM bench_ask_result ORDER BY created_at DESC LIMIT 1\n)\nORDER BY question_id;",
+          "rawSql": "SELECT\n  persona_id AS \"Persona\",\n  companion_gender AS \"Gender\",\n  question_id AS \"Question ID\",\n  LEFT(question, 100) AS \"Question\",\n  ROUND(current_ts::numeric, 1) AS \"Playhead\",\n  ROUND(latency_ms::numeric, 0) AS \"Latency ms\",\n  cache_source AS \"Cache\",\n  model_name AS \"Model\",\n  LEFT(answer, 240) AS \"Answer\"\nFROM bench_ask_result\nWHERE run_id = (\n  SELECT run_id FROM bench_ask_result ORDER BY created_at DESC LIMIT 1\n)\nORDER BY persona_id, question_id;",
           "format": "table",
           "refId": "A"
         }

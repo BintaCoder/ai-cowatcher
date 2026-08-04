@@ -127,6 +127,8 @@ class BenchAskResult(Base):
     cache_source: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
     model_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     model_tier: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    persona_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    companion_gender: Mapped[str] = mapped_column(String(16), nullable=False, default="")
     used_context: Mapped[bool | None] = mapped_column(nullable=True)
     skip_memory: Mapped[bool | None] = mapped_column(nullable=True)
     kind: Mapped[str | None] = mapped_column(String(64), nullable=True)

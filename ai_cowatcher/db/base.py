@@ -89,3 +89,15 @@ def _apply_lightweight_migrations(engine) -> None:
                 "ADD COLUMN IF NOT EXISTS cast_cached_at TIMESTAMPTZ"
             )
         )
+        conn.execute(
+            text(
+                "ALTER TABLE bench_ask_result "
+                "ADD COLUMN IF NOT EXISTS persona_id VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE bench_ask_result "
+                "ADD COLUMN IF NOT EXISTS companion_gender VARCHAR(16) NOT NULL DEFAULT ''"
+            )
+        )

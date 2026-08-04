@@ -179,6 +179,18 @@
         <select id="titleSelect" disabled>
           <option value="">Loading titles…</option>
         </select>
+        <label for="personaSelect">Companion</label>
+        <select id="personaSelect" title="Personality tone for answers">
+          <option value="easygoing_friend">Easygoing Friend</option>
+          <option value="witty_friend">Witty Friend</option>
+          <option value="calm_scout">Calm Scout</option>
+        </select>
+        <label for="genderSelect">Voice</label>
+        <select id="genderSelect" title="Preferred speech voice gender">
+          <option value="female">Female</option>
+          <option value="male">Male</option>
+          <option value="neutral">Neutral</option>
+        </select>
       </div>
     </header>
 
@@ -223,6 +235,8 @@
   <script>
     const player = document.getElementById("player");
     const titleSelect = document.getElementById("titleSelect");
+    const personaSelect = document.getElementById("personaSelect");
+    const genderSelect = document.getElementById("genderSelect");
     const listenBadge = document.getElementById("listenBadge");
     const listenBadgeText = document.getElementById("listenBadgeText");
     const sendBtn = document.getElementById("sendBtn");
@@ -237,6 +251,97 @@
     const synth = window.speechSynthesis;
 
     const USER_ID = "web-viewer";
+    const LS_PERSONA = "cowatcher.persona_id";
+    const LS_GENDER = "cowatcher.companion_gender";
+    /** Persona TTS presets (rate / pitch) — mirrors server persona JSON. */
+    const PERSONA_TTS = {
+      witty_friend: { rate: 1.06, pitch: 1.05 },
+      easygoing_friend: { rate: 0.98, pitch: 1.0 },
+      calm_scout: { rate: 0.95, pitch: 0.95 },
+    };
+
+    function loadCompanionPrefs() {
+      try {
+        const p = localStorage.getItem(LS_PERSONA);
+        if (p && personaSelect && [...personaSelect.options].some((o) => o.value === p)) {
+          personaSelect.value = p;
+        }
+        const g = localStorage.getItem(LS_GENDER);
+        if (g && genderSelect && [...genderSelect.options].some((o) => o.value === g)) {
+          genderSelect.value = g;
+        }
+      } catch (_) { /* ignore */ }
+    }
+
+    function saveCompanionPrefs() {
+      try {
+        if (personaSelect) localStorage.setItem(LS_PERSONA, personaSelect.value);
+        if (genderSelect) localStorage.setItem(LS_GENDER, genderSelect.value);
+      } catch (_) { /* ignore */ }
+    }
+
+    function currentPersonaId() {
+      return (personaSelect && personaSelect.value) || "easygoing_friend";
+    }
+
+    function currentCompanionGender() {
+      return (genderSelect && genderSelect.value) || "female";
+    }
+
+    function pickVoiceForGender(gender) {
+      if (!synth || typeof synth.getVoices !== "function") return null;
+      const voices = synth.getVoices() || [];
+      if (!voices.length) return null;
+      const g = (gender || "neutral").toLowerCase();
+      const score = (v) => {
+        const name = `${v.name || ""} ${v.lang || ""}`.toLowerCase();
+        let s = 0;
+        if (v.lang && v.lang.toLowerCase().startsWith("en")) s += 3;
+        if (g === "female") {
+          if (/\b(female|woman|zira|samantha|karen|moira|tessa|fiona|victoria|google us english female)\b/.test(name)) s += 5;
+          if (/\b(male|david|daniel|mark|alex|fred|rishi)\b/.test(name)) s -= 3;
+        } else if (g === "male") {
+          if (/\b(male|david|daniel|mark|alex|fred|rishi|google us english male)\b/.test(name)) s += 5;
+          if (/\b(female|woman|zira|samantha|karen|moira|tessa|fiona|victoria)\b/.test(name)) s -= 3;
+        } else {
+          // neutral: prefer non-extreme names, still English first
+          if (/\b(neural|natural|enhanced)\b/.test(name)) s += 1;
+        }
+        return s;
+      };
+      let best = voices[0];
+      let bestScore = score(best);
+      for (const v of voices) {
+        const sc = score(v);
+        if (sc > bestScore) {
+          best = v;
+          bestScore = sc;
+        }
+      }
+      return best;
+    }
+
+    function applyUtteranceVoice(utterance) {
+      const personaId = currentPersonaId();
+      const gender = currentCompanionGender();
+      const tts = PERSONA_TTS[personaId] || { rate: 1.0, pitch: 1.0 };
+      utterance.rate = Math.min(1.4, Math.max(0.7, tts.rate || 1));
+      utterance.pitch = Math.min(1.5, Math.max(0.5, tts.pitch || 1));
+      const voice = pickVoiceForGender(gender);
+      if (voice) utterance.voice = voice;
+    }
+
+    if (personaSelect) {
+      personaSelect.addEventListener("change", saveCompanionPrefs);
+    }
+    if (genderSelect) {
+      genderSelect.addEventListener("change", saveCompanionPrefs);
+    }
+    loadCompanionPrefs();
+    // Chromium loads voices asynchronously
+    if (synth && typeof synth.onvoiceschanged !== "undefined") {
+      synth.onvoiceschanged = () => { /* warm voice list */ synth.getVoices(); };
+    }
     /** Min gap between STT sessions — prevents Chromium speech-process thrash. */
     const LISTEN_COOLDOWN_MS = 1800;
     /** Rebuild SpeechRecognition periodically (handlers + internal buffers). */
@@ -904,7 +1009,7 @@
       setTtsSpeaking(true);
       setStatus("Answering…", "ok");
       const utterance = new SpeechSynthesisUtterance(spoken);
-      utterance.rate = 1;
+      applyUtteranceVoice(utterance);
       const finish = () => {
         setTtsSpeaking(false);
         if (!askInFlight) setStatus(readyMessage, "ok");
@@ -937,6 +1042,8 @@
           current_ts: capturedTs,
           question,
           user_id: USER_ID,
+          persona_id: currentPersonaId(),
+          companion_gender: currentCompanionGender(),
         }),
         signal: activeStreamAbort.signal,
       });

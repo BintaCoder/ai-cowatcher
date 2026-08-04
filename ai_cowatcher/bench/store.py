@@ -27,6 +27,8 @@ class BenchResultRow:
     cache_source: str
     model_name: str
     model_tier: str
+    persona_id: str = ""
+    companion_gender: str = ""
     used_context: bool | None = None
     skip_memory: bool | None = None
     error: str | None = None
@@ -59,6 +61,8 @@ def insert_bench_result(session: Session, row: BenchResultRow) -> None:
             cache_source=row.cache_source,
             model_name=row.model_name,
             model_tier=row.model_tier,
+            persona_id=row.persona_id or "",
+            companion_gender=row.companion_gender or "",
             used_context=row.used_context,
             skip_memory=row.skip_memory,
             error=row.error,

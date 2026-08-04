@@ -119,6 +119,58 @@ def test_http_error_helpers() -> None:
     assert not _is_retryable_ask_status(400, "bad request")
 
 
+def test_post_ask_payload_includes_persona(monkeypatch) -> None:
+    """post_ask must send persona_id + companion_gender (QA cache / tone)."""
+    from ai_cowatcher.bench import ask_runner
+
+    captured: dict = {}
+
+    class FakeResp:
+        is_success = True
+        status_code = 200
+        request = None
+
+        def json(self):
+            return {
+                "answer": "ok",
+                "model_name": "mock",
+                "model_tier": "fast",
+                "escalation_reason": "merged:CONTENT",
+            }
+
+    class FakeClient:
+        def post(self, url, json=None):  # noqa: A002
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResp()
+
+    data, _ms = ask_runner.post_ask(
+        FakeClient(),  # type: ignore[arg-type]
+        base_url="http://localhost:8000",
+        title_id="friends_ross",
+        question="Who is that?",
+        current_ts=40.0,
+        user_id="bench",
+        persona_id="witty_friend",
+        companion_gender="female",
+        retries=0,
+    )
+    assert data["answer"] == "ok"
+    assert captured["json"]["persona_id"] == "witty_friend"
+    assert captured["json"]["companion_gender"] == "female"
+
+
+def test_bench_cli_persona_flags() -> None:
+    from ai_cowatcher.bench.ask_runner import build_parser
+
+    ns = build_parser().parse_args(
+        ["--persona-id", "witty_friend", "--companion-gender", "male", "--all-personas"]
+    )
+    assert ns.persona_id == "witty_friend"
+    assert ns.companion_gender == "male"
+    assert ns.all_personas is True
+
+
 def test_default_title_name() -> None:
     assert DEFAULT_TITLE_NAME == "Friends Ross"
 

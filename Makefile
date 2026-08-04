@@ -52,6 +52,8 @@ health:
 # Results → Postgres bench_ask_result + benchmarks/results/<run_id>.jsonl → Grafana "Ask Bench".
 # Usage: make bench-ask
 #        make bench-ask SEED=42 N=5 TITLE="Friends Ross"
+#        make bench-ask PERSONA=witty_friend GENDER=female
+#        make bench-ask ALL_PERSONAS=1 N=3   # same samples × each persona
 bench-ask:
 	TOKENIZERS_PARALLELISM=false PYTHONPATH=. .venv/bin/python -m ai_cowatcher.bench.ask_runner \
 		--title-id "$(or $(TITLE),Friends Ross)" \
@@ -59,4 +61,7 @@ bench-ask:
 		$(if $(SEED),--seed $(SEED),) \
 		$(if $(BASE_URL),--base-url $(BASE_URL),) \
 		$(if $(DURATION),--duration-sec $(DURATION),) \
+		$(if $(PERSONA),--persona-id $(PERSONA),) \
+		$(if $(GENDER),--companion-gender $(GENDER),) \
+		$(if $(ALL_PERSONAS),--all-personas,) \
 		$(if $(ALLOW_MOCK),--allow-mock,)

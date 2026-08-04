@@ -54,6 +54,51 @@ def test_exact_hit_after_store(qa_cache: QACache):
     assert "foyer" in hit.answer
 
 
+def test_persona_isolation_same_question(qa_cache: QACache):
+    """Same Q + ts, different persona_id must not cross-hit (exact or semantic)."""
+    qa_cache.store(
+        "t1",
+        42.0,
+        "What just happened?",
+        "Witty take on the foyer fight.",
+        persona_id="witty_friend",
+    )
+    qa_cache.store(
+        "t1",
+        42.0,
+        "What just happened?",
+        "Easygoing read of the foyer scene.",
+        persona_id="easygoing_friend",
+    )
+    witty = qa_cache.lookup(
+        "t1", 45.0, "what just happened", persona_id="witty_friend"
+    )
+    easy = qa_cache.lookup(
+        "t1", 45.0, "what just happened", persona_id="easygoing_friend"
+    )
+    other = qa_cache.lookup(
+        "t1", 45.0, "what just happened", persona_id="calm_scout"
+    )
+    assert witty is not None and witty.source == "exact"
+    assert "Witty" in witty.answer
+    assert easy is not None and easy.source == "exact"
+    assert "Easygoing" in easy.answer
+    assert other is None
+
+    # Semantic path also filters by persona_id (use same question string as store
+    # so MockTextEmbedder vectors align — exact tier used normalize already).
+    qa_cache._exact = InMemoryExactKV()
+    witty_sem = qa_cache.lookup(
+        "t1", 45.0, "What just happened?", persona_id="witty_friend"
+    )
+    calm_sem = qa_cache.lookup(
+        "t1", 45.0, "What just happened?", persona_id="calm_scout"
+    )
+    assert witty_sem is not None and witty_sem.source == "semantic"
+    assert "Witty" in witty_sem.answer
+    assert calm_sem is None
+
+
 def test_bucket_mismatch_is_miss(qa_cache: QACache):
     qa_cache.store("t1", 10.0, "Who is that?", "The detective.")
     # Far later playhead → different bucket

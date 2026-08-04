@@ -18,10 +18,11 @@ from ai_cowatcher.agent.completion import (
 from ai_cowatcher.agent.grounding import grounded_fallback_answer, is_refusal_answer
 from ai_cowatcher.agent.intent_tags import (
     IntentStreamParser,
-    MERGED_SYSTEM_PROMPT,
+    build_merged_system_prompt,
     build_merged_user_turn,
     parse_tagged_answer,
     social_body_or_default,
+    with_persona_system_prompt,
 )
 from ai_cowatcher.agent.joke_intent import (
     is_joke_request,
@@ -47,6 +48,12 @@ from ai_cowatcher.agent.tools import (
     USER_MEMORY_TOOL,
 )
 from ai_cowatcher.config import Settings
+from ai_cowatcher.personas.loader import (
+    CompanionGender,
+    Persona,
+    get_persona,
+    normalize_companion_gender,
+)
 from ai_cowatcher.observability.ask_latency import (
     STAGE_GATE,
     STAGE_MULTIMODAL,
@@ -120,10 +127,21 @@ class ConversationAgent:
         self._user_memory = user_memory
         self._object_store = object_store
 
+    def _resolve_persona(
+        self,
+        persona_id: str | None,
+        companion_gender: str | None,
+    ) -> tuple[Persona, CompanionGender | None]:
+        default = getattr(self._settings, "default_persona_id", None)
+        persona = get_persona(persona_id, default_id=default)
+        gender = normalize_companion_gender(companion_gender)
+        return persona, gender
+
     def _gated_answer(
         self,
         *,
         question: str,
+        persona: Persona | None = None,
     ) -> tuple[AgentAnswer | None, TokenUsage]:
         from ai_cowatcher.agent.utterance_gate import classify_utterance
 
@@ -137,9 +155,18 @@ class ConversationAgent:
             return None, usage
 
         model = self._settings.conversation_fast_model
+        reply = decision.reply
+        if (
+            decision.action in ("social", "off_topic")
+            and persona is not None
+            and persona.canned_social_reply
+        ):
+            # Prefer persona canned SOCIAL lines over the generic gate string.
+            if not (reply or "").strip() or decision.action == "social":
+                reply = persona.canned_social_reply
         return (
             AgentAnswer(
-                text=decision.reply,
+                text=reply,
                 model_tier="fast",
                 model_name=model,
                 escalation_reason=decision.reason,
@@ -148,7 +175,7 @@ class ConversationAgent:
                 completion_tokens=usage.completion_tokens if usage else None,
                 total_tokens=usage.total_tokens if usage else None,
                 skip_memory=decision.skip_memory or decision.action == "ignore",
-                speak=decision.speak and bool(decision.reply.strip()),
+                speak=decision.speak and bool((reply or "").strip()),
             ),
             usage,
         )
@@ -184,10 +211,13 @@ class ConversationAgent:
         title_display_name: str | None = None,
         latency: AskLatencyTracker | None = None,
         query_embedding: list[float] | None = None,
+        persona_id: str | None = None,
+        companion_gender: str | None = None,
     ) -> AgentAnswer:
+        persona, gender = self._resolve_persona(persona_id, companion_gender)
         latency = latency or AskLatencyTracker(path="ask")
         with latency.stage(STAGE_GATE):
-            gated, gate_usage = self._gated_answer(question=question)
+            gated, gate_usage = self._gated_answer(question=question, persona=persona)
         if gated is not None:
             return gated
 
@@ -201,6 +231,8 @@ class ConversationAgent:
                 gate_usage=gate_usage,
                 latency=latency,
                 query_embedding=query_embedding,
+                persona=persona,
+                companion_gender=gender,
             )
 
         tier_selection = self._tier_router.select_tier(question)
@@ -259,13 +291,16 @@ class ConversationAgent:
         title_display_name: str | None = None,
         latency: AskLatencyTracker | None = None,
         query_embedding: list[float] | None = None,
+        persona_id: str | None = None,
+        companion_gender: str | None = None,
     ) -> Iterator[AskStreamEvent]:
         """Yield progressive status/token events and a final ``done`` event."""
+        persona, gender = self._resolve_persona(persona_id, companion_gender)
         latency = latency or AskLatencyTracker(path="ask_stream")
         yield AskStreamEvent(type="status", message="Listening for intent…")
 
         with latency.stage(STAGE_GATE):
-            gated, gate_usage = self._gated_answer(question=question)
+            gated, gate_usage = self._gated_answer(question=question, persona=persona)
         if gated is not None:
             if gated.text:
                 yield AskStreamEvent(type="status", message="Quick reply…")
@@ -300,6 +335,8 @@ class ConversationAgent:
                 gate_usage=gate_usage,
                 latency=latency,
                 query_embedding=query_embedding,
+                persona=persona,
+                companion_gender=gender,
             )
             return
 
@@ -446,9 +483,14 @@ class ConversationAgent:
         current_ts: float,
         question: str,
         scene_evidence: str,
+        persona: Persona | None = None,
+        companion_gender: CompanionGender | None = None,
     ) -> list[dict[str, Any]]:
+        system = build_merged_system_prompt(
+            persona, companion_gender=companion_gender
+        )
         return [
-            {"role": "system", "content": MERGED_SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {
                 "role": "user",
                 "content": build_merged_user_turn(
@@ -468,6 +510,7 @@ class ConversationAgent:
         question: str,
         tool_payloads: list[Any],
         used_context: bool,
+        persona: Persona | None = None,
     ) -> tuple[str, bool, bool, bool, str]:
         """Return (text, speak, skip_memory, navigate, reason)."""
         joke_mode = tag == "JOKE" or is_joke_request(question)
@@ -476,8 +519,11 @@ class ConversationAgent:
         if tag == "NAVIGATE":
             return "", False, True, True, "merged:NAVIGATE"
         if tag == "SOCIAL":
+            canned = persona.canned_social_reply if persona else None
             text = enforce_brief_answer(
-                social_body_or_default(body), question, joke_mode=False
+                social_body_or_default(body, canned=canned),
+                question,
+                joke_mode=False,
             )
             return text, True, True, False, "merged:SOCIAL"
         if tag == "JOKE":
@@ -517,6 +563,8 @@ class ConversationAgent:
         gate_usage: TokenUsage,
         latency: AskLatencyTracker | None = None,
         query_embedding: list[float] | None = None,
+        persona: Persona | None = None,
+        companion_gender: CompanionGender | None = None,
     ) -> AgentAnswer:
         del title_display_name  # evidence path only for now
         model = self._settings.conversation_fast_model
@@ -534,6 +582,8 @@ class ConversationAgent:
             current_ts=current_ts,
             question=question,
             scene_evidence=scene_evidence,
+            persona=persona,
+            companion_gender=companion_gender,
         )
         max_tokens = self._answer_max_tokens(question)
         t_llm = latency
@@ -587,6 +637,7 @@ class ConversationAgent:
             question=question,
             tool_payloads=payloads,
             used_context=used_context,
+            persona=persona,
         )
         del navigate  # non-stream: client still does local navigate heuristics
         return AgentAnswer(
@@ -613,6 +664,8 @@ class ConversationAgent:
         gate_usage: TokenUsage,
         latency: AskLatencyTracker | None = None,
         query_embedding: list[float] | None = None,
+        persona: Persona | None = None,
+        companion_gender: CompanionGender | None = None,
     ) -> Iterator[AskStreamEvent]:
         del title_display_name
         model = self._settings.conversation_fast_model
@@ -637,6 +690,8 @@ class ConversationAgent:
             current_ts=current_ts,
             question=question,
             scene_evidence=scene_evidence,
+            persona=persona,
+            companion_gender=companion_gender,
         )
 
         yield AskStreamEvent(type="status", message="Answering…")
@@ -710,6 +765,7 @@ class ConversationAgent:
             question=question,
             tool_payloads=payloads,
             used_context=used_context,
+            persona=persona,
         )
 
         # If finalize rewrote answer (grounding), re-emit a clean last answer
@@ -1272,9 +1328,19 @@ class ConversationAgent:
         search_title: str | None,
         *,
         joke_mode: bool = False,
+        persona: Persona | None = None,
+        companion_gender: CompanionGender | None = None,
     ) -> list[dict[str, Any]]:
+        if persona is None:
+            default = getattr(self._settings, "default_persona_id", None)
+            persona = get_persona(None, default_id=default)
+        system = with_persona_system_prompt(
+            CONVERSATION_SYSTEM_PROMPT,
+            persona,
+            companion_gender=companion_gender,
+        )
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": CONVERSATION_SYSTEM_PROMPT}
+            {"role": "system", "content": system}
         ]
         if joke_mode:
             messages.append({"role": "system", "content": JOKE_MODE_SYSTEM_PROMPT})

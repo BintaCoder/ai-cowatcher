@@ -76,10 +76,12 @@ def exact_key(
     question: str,
     *,
     bucket_sec: int,
+    persona_id: str = "",
 ) -> str:
     norm = normalize_question(question)
     bucket = ts_bucket(current_ts, bucket_sec)
-    raw = f"{title_id}:{bucket}:{norm}"
+    persona = (persona_id or "").strip() or "_"
+    raw = f"{title_id}:{bucket}:{persona}:{norm}"
     return "qa_exact:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -137,10 +139,19 @@ class QACache:
     # ---------- Tier 1: exact ----------
 
     def _exact_lookup(
-        self, title_id: str, current_ts: float, question: str
+        self,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        *,
+        persona_id: str = "",
     ) -> CachedAnswer | None:
         key = exact_key(
-            title_id, current_ts, question, bucket_sec=self._bucket_sec
+            title_id,
+            current_ts,
+            question,
+            bucket_sec=self._bucket_sec,
+            persona_id=persona_id,
         )
         try:
             raw = self._exact.get(key)
@@ -169,9 +180,15 @@ class QACache:
         question: str,
         answer: str,
         audio_object_key: str | None,
+        *,
+        persona_id: str = "",
     ) -> None:
         key = exact_key(
-            title_id, current_ts, question, bucket_sec=self._bucket_sec
+            title_id,
+            current_ts,
+            question,
+            bucket_sec=self._bucket_sec,
+            persona_id=persona_id,
         )
         payload = {
             "answer": answer,
@@ -179,6 +196,7 @@ class QACache:
             "title_id": title_id,
             "ts_bucket": ts_bucket(current_ts, self._bucket_sec),
             "created_at": time.time(),
+            "persona_id": (persona_id or "").strip() or "_",
         }
         try:
             self._exact.setex(key, self._exact_ttl, json.dumps(payload))
@@ -192,10 +210,13 @@ class QACache:
         title_id: str,
         current_ts: float,
         question_embedding: list[float],
+        *,
+        persona_id: str = "",
     ) -> CachedAnswer | None:
         if not self._qdrant.collection_exists(self._collection):
             return None
         bucket = ts_bucket(current_ts, self._bucket_sec)
+        persona = (persona_id or "").strip() or "_"
         query_filter = qmodels.Filter(
             must=[
                 qmodels.FieldCondition(
@@ -203,6 +224,9 @@ class QACache:
                 ),
                 qmodels.FieldCondition(
                     key="ts_bucket", match=qmodels.MatchValue(value=bucket)
+                ),
+                qmodels.FieldCondition(
+                    key="persona_id", match=qmodels.MatchValue(value=persona)
                 ),
             ]
         )
@@ -252,6 +276,8 @@ class QACache:
         question_embedding: list[float],
         answer: str,
         audio_object_key: str | None,
+        *,
+        persona_id: str = "",
     ) -> None:
         if not self._qdrant.collection_exists(self._collection):
             self.ensure_collection()
@@ -259,8 +285,11 @@ class QACache:
             return
         bucket = ts_bucket(current_ts, self._bucket_sec)
         norm = normalize_question(question)
+        persona = (persona_id or "").strip() or "_"
         point_id = str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f"qa:{title_id}:{bucket}:{norm}")
+            uuid.uuid5(
+                uuid.NAMESPACE_URL, f"qa:{title_id}:{bucket}:{persona}:{norm}"
+            )
         )
         payload: dict[str, Any] = {
             "answer": answer,
@@ -269,6 +298,7 @@ class QACache:
             "ts_bucket": bucket,
             "created_at": time.time(),
             "question_norm": norm,
+            "persona_id": persona,
         }
         try:
             self._qdrant.upsert(
@@ -287,18 +317,27 @@ class QACache:
     # ---------- Public API ----------
 
     def lookup(
-        self, title_id: str, current_ts: float, question: str
+        self,
+        title_id: str,
+        current_ts: float,
+        question: str,
+        *,
+        persona_id: str = "",
     ) -> CachedAnswer | None:
         """Exact first (near-zero cost), then semantic. None on full miss.
 
         Exact hits never call the embedder. Semantic embed runs only on exact miss.
         Stage timings are logged as ``qa_cache_lookup`` for latency dashboards.
+        Cache keys isolate by persona_id so different tones never cross-hit.
         """
         self.last_query_embedding = None
         t0 = time.perf_counter()
+        persona = (persona_id or "").strip()
 
         t_exact = time.perf_counter()
-        hit = self._exact_lookup(title_id, current_ts, question)
+        hit = self._exact_lookup(
+            title_id, current_ts, question, persona_id=persona
+        )
         exact_ms = (time.perf_counter() - t_exact) * 1000.0
         if hit and hit.answer.strip():
             self._record_cache_metric("exact_hit")
@@ -331,7 +370,9 @@ class QACache:
             return None
 
         t_sem = time.perf_counter()
-        hit = self._semantic_lookup(title_id, current_ts, embedding)
+        hit = self._semantic_lookup(
+            title_id, current_ts, embedding, persona_id=persona
+        )
         semantic_ms = (time.perf_counter() - t_sem) * 1000.0
         if hit:
             self._record_cache_metric("semantic_hit")
@@ -402,12 +443,21 @@ class QACache:
         *,
         question_embedding: list[float] | None = None,
         audio_object_key: str | None = None,
+        persona_id: str = "",
     ) -> None:
         """Write-through to both tiers after a fresh answer."""
         text = (answer or "").strip()
         if not text:
             return
-        self._exact_store(title_id, current_ts, question, text, audio_object_key)
+        persona = (persona_id or "").strip()
+        self._exact_store(
+            title_id,
+            current_ts,
+            question,
+            text,
+            audio_object_key,
+            persona_id=persona,
+        )
 
         embedding = question_embedding or self.last_query_embedding
         if embedding is None:
@@ -417,7 +467,13 @@ class QACache:
                 logger.exception("QA cache embed for store failed")
                 return
         self._semantic_store(
-            title_id, current_ts, question, embedding, text, audio_object_key
+            title_id,
+            current_ts,
+            question,
+            embedding,
+            text,
+            audio_object_key,
+            persona_id=persona,
         )
 
 

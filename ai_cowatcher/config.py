@@ -258,6 +258,12 @@ class Settings(BaseSettings):
     user_memory_cache_turns: int = Field(default=20, alias="USER_MEMORY_CACHE_TURNS")
     user_memory_redis_ttl_sec: int = Field(default=3600, alias="USER_MEMORY_REDIS_TTL_SEC")
 
+    # ── Companion persona (tone pack under ai_cowatcher/personas/) ─────────────
+    default_persona_id: str = Field(
+        default="easygoing_friend",
+        alias="DEFAULT_PERSONA_ID",
+    )
+
     # ── Cast / actor lookup (TMDB) ────────────────────────────────────────────
     # Public cast metadata is not a plot spoiler, so this is safe to expose.
     tmdb_api_key: str = Field(default="", alias="TMDB_API_KEY")

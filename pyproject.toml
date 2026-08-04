@@ -62,7 +62,7 @@ where = ["."]
 include = ["ai_cowatcher*"]
 
 [tool.setuptools.package-data]
-ai_cowatcher = ["web/*.html"]
+ai_cowatcher = ["web/*.html", "personas/*.json"]
 
 [tool.ruff]
 line-length = 100

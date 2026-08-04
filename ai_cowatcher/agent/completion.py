@@ -688,11 +688,13 @@ def _mock_merged_scene_json(messages: list[dict[str, Any]]) -> str | None:
 def _mock_merged_tagged_reply(messages: list[dict[str, Any]]) -> str:
     question = _mock_merged_viewer_question(messages)
     lower = question.lower().strip()
+    persona_line = _mock_persona_social_from_messages(messages)
 
     if not lower or lower in ("um", "uh", "hmm", "ah", "oh"):
         return "[FILLER]"
     if re.fullmatch(r"(hi|hello|hey|thanks|thank you|bye|cool|lol)\.?!?", lower):
-        return "[SOCIAL]\n\nRight here with you — ask about the show anytime."
+        social = persona_line or "Right here with you — ask about the show anytime."
+        return f"[SOCIAL]\n\n{social}"
     if any(
         token in lower
         for token in ("go to", "jump to", "skip to", "take me to", "credits", "rewind")
@@ -709,6 +711,11 @@ def _mock_merged_tagged_reply(messages: list[dict[str, Any]]) -> str:
                 line = "Waiting on a beat to riff on."
         else:
             line = "Waiting on a beat to riff on."
+        # Light persona flavor without breaking fact grounding.
+        if "witty" in _mock_persona_id_from_messages(messages):
+            line = f"Okay but — {line}"
+        elif "calm" in _mock_persona_id_from_messages(messages):
+            line = line.rstrip(".!") + "."
         return f"[JOKE]\n\n{line}"
 
     tool_json = _mock_merged_scene_json(messages)
@@ -721,7 +728,37 @@ def _mock_merged_tagged_reply(messages: list[dict[str, Any]]) -> str:
             body = "Something's happening on screen — details still fuzzy."
     else:
         body = "Not sure yet — nothing's made that clear so far."
+    pid = _mock_persona_id_from_messages(messages)
+    if "witty" in pid and body and not body.lower().startswith("not sure"):
+        body = body.rstrip(".!") + " — wild beat."
+    elif "calm" in pid and body:
+        body = body  # neutral delivery
     return f"[CONTENT]\n\n{body}"
+
+
+def _mock_persona_social_from_messages(messages: list[dict[str, Any]]) -> str | None:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = str(msg.get("content") or "")
+        match = re.search(
+            r'SOCIAL canned reply when tag is SOCIAL[^:]*:\s*"([^"]+)"',
+            content,
+        )
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _mock_persona_id_from_messages(messages: list[dict[str, Any]]) -> str:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = str(msg.get("content") or "")
+        match = re.search(r"Companion persona:.*?\(([^)]+)\)", content)
+        if match:
+            return match.group(1).strip().lower()
+    return ""
 
 
 def _is_utterance_gate_request(messages: list[dict[str, Any]]) -> bool:

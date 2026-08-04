@@ -45,6 +45,8 @@ async def ask_question(
             question=request.question,
             user_id=request.user_id,
             persist_memory=False,
+            persona_id=request.persona_id,
+            companion_gender=request.companion_gender,
         )
     except Exception as exc:
         record_ask_error()
@@ -92,6 +94,8 @@ async def ask_question_stream(
                 question=request.question,
                 user_id=request.user_id,
                 persist_memory=False,
+                persona_id=request.persona_id,
+                companion_gender=request.companion_gender,
             ):
                 loop.call_soon_threadsafe(queue.put_nowait, event)
         except BaseException as exc:  # noqa: BLE001 — surface to SSE consumer
