@@ -6,15 +6,25 @@ loop. Program volume is now driven only by **explicit speech-state hooks**.
 
 ## State matrix
 
-| User speaking | AI speaking | Pipeline (ask) | Program gain |
-|---------------|-------------|----------------|--------------|
-| yes | * | * | **0.15** (duck, ~0.15s) |
-| * | yes | * | **0.15** |
-| * | * | yes | **0.15** |
-| no | no | no | **1.0** after **1.5s** (+ BT pad) continuous silence (~0.6s recover) |
+| User speaking | Gemini speaking | Pipeline (ask) | Program gain |
+|---------------|-----------------|----------------|--------------|
+| yes | * | * | **0.20** instant cut (~0.02s linear) |
+| no | yes | * | **0.05** deep duck (~0.2s linear) |
+| no | no | yes | **0.20** instant |
+| no | no | no | **1.0** after **1.5s** (+ BT pad) via `setTargetAtTime` (~0.6s) |
 
-Cross-talk: if the user speaks while recovering, `cancelScheduledValues` runs
-and gain locks back at the duck floor immediately.
+Cross-talk: if the user presses Hold-to-talk while Gemini is speaking,
+`cancelScheduledValues` runs and gain snaps to **20%** immediately (no
+exponential `setTargetAtTime` lag on Bluetooth).
+
+### Multi-tier constants
+
+```ts
+const USER_DUCK_VOLUME = 0.20;   // while you talk
+const GEMINI_DUCK_VOLUME = 0.05; // while Gemini TTS plays
+```
+
+Hooks: `onUserSpeechStart` / `onGeminiSpeechStart` (alias of `onAISpeechStart`).
 
 ## Files
 
@@ -31,20 +41,22 @@ and gain locks back at the duck floor immediately.
 
 ```ts
 const ducker = new SmartAIDucker(videoEl, {
-  duckGain: 0.15,
-  duckAttackSec: 0.15,
+  userDuckVolume: 0.2,
+  geminiDuckVolume: 0.05,
+  userCutSec: 0.02,
+  geminiDuckSec: 0.2,
   recoverySec: 0.6,
   holdMs: 1500,
   sampleRate: 48000,
   bluetoothOffsetMs: 150,
 });
-await ducker.start(); // video → GainNode @ 48 kHz; do not openMic for amplitude
+await ducker.start();
 
-ducker.onUserSpeechStart();
+ducker.onUserSpeechStart();   // instant → 20%
 ducker.onUserSpeechEnd();
-ducker.onAISpeechStart();
-ducker.onAISpeechEnd();
-ducker.setPipelineActive(true); // optional: duck while /ask is in-flight
+ducker.onGeminiSpeechStart(); // linear → 5% over 0.2s
+ducker.onGeminiSpeechEnd();
+ducker.setPipelineActive(true);
 ```
 
 On `/watch`, Hold-to-talk and SpeechRecognition call the user hooks; TTS calls

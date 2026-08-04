@@ -33,6 +33,7 @@ def _run_ducker_js(snippet: str) -> dict:
     script = f"""
 const api = require({json.dumps(str(_DUCKER_JS))});
 const {{ SmartAIDucker, DEFAULTS, MIC_CONSTRAINTS, timeConstantFor, findAirPodsOutput, UNIFIED_SAMPLE_RATE }} = api;
+void api;
 
 class FakeMedia {{
   constructor() {{
@@ -90,31 +91,35 @@ def test_defaults_and_mic_constraints():
     out = _run_ducker_js(
         """
         return {
-          duckGain: DEFAULTS.duckGain,
+          userDuck: DEFAULTS.userDuckVolume,
+          geminiDuck: DEFAULTS.geminiDuckVolume,
+          userCut: DEFAULTS.userCutSec,
+          geminiSec: DEFAULTS.geminiDuckSec,
           holdMs: DEFAULTS.holdMs,
-          duckAttack: DEFAULTS.duckAttackSec,
-          recovery: DEFAULTS.recoverySec,
           btOffset: DEFAULTS.bluetoothOffsetMs,
           sampleRate: DEFAULTS.sampleRate,
           echo: MIC_CONSTRAINTS.audio.echoCancellation,
           ns: MIC_CONSTRAINTS.audio.noiseSuppression,
           agc: MIC_CONSTRAINTS.audio.autoGainControl,
           latencyIdeal: MIC_CONSTRAINTS.audio.latency.ideal,
-          tau: timeConstantFor(0.15),
+          exportedUser: api.USER_DUCK_VOLUME,
+          exportedGemini: api.GEMINI_DUCK_VOLUME,
         };
         """
     )
-    assert out["duckGain"] == pytest.approx(0.15)
+    assert out["userDuck"] == pytest.approx(0.2)
+    assert out["geminiDuck"] == pytest.approx(0.05)
+    assert out["userCut"] == pytest.approx(0.02)
+    assert out["geminiSec"] == pytest.approx(0.2)
     assert out["holdMs"] == 1500
-    assert out["duckAttack"] == pytest.approx(0.15)
-    assert out["recovery"] == pytest.approx(0.6)
     assert out["btOffset"] == 150
     assert out["sampleRate"] == 48000
     assert out["echo"] is True
     assert out["ns"] is True
     assert out["agc"] is False
     assert out["latencyIdeal"] == pytest.approx(0.01)
-    assert out["tau"] == pytest.approx(0.05)
+    assert out["exportedUser"] == pytest.approx(0.2)
+    assert out["exportedGemini"] == pytest.approx(0.05)
 
 
 @pytest.mark.skipif(not _node_available(), reason="node required for SmartAIDucker unit tests")
@@ -124,11 +129,11 @@ def test_state_matrix_user_or_ai_or_pipeline():
         const d = new SmartAIDucker(new FakeMedia(), { holdMs: 1500 });
         d.onUserSpeechStart();
         const afterUser = d.getState();
-        d.onAISpeechStart();
+        d.onGeminiSpeechStart();
         const both = d.getState();
         d.onUserSpeechEnd();
-        const aiOnly = d.getState();
-        d.onAISpeechEnd();
+        const geminiOnly = d.getState();
+        d.onGeminiSpeechEnd();
         const recovering = d.getState();
         d.setPipelineActive(true);
         const pipeline = d.getState();
@@ -137,28 +142,57 @@ def test_state_matrix_user_or_ai_or_pipeline():
         return {
           afterUser,
           both,
-          aiOnly,
+          geminiOnly,
           recovering,
           pipeline,
           afterPipe,
-          duckGain: d.opts.duckGain,
+          userDuck: d.opts.userDuckVolume,
+          geminiDuck: d.opts.geminiDuckVolume,
         };
         """
     )
     assert out["afterUser"]["userSpeaking"] is True
     assert out["afterUser"]["ducked"] is True
-    assert out["afterUser"]["gain"] == pytest.approx(out["duckGain"])
+    assert out["afterUser"]["duckTier"] == "user"
+    assert out["afterUser"]["gain"] == pytest.approx(out["userDuck"])
     assert out["both"]["userSpeaking"] is True and out["both"]["aiSpeaking"] is True
-    assert out["both"]["ducked"] is True
-    assert out["aiOnly"]["userSpeaking"] is False
-    assert out["aiOnly"]["aiSpeaking"] is True
-    assert out["aiOnly"]["ducked"] is True
+    assert out["both"]["duckTier"] == "user"
+    assert out["both"]["gain"] == pytest.approx(out["userDuck"])
+    assert out["geminiOnly"]["userSpeaking"] is False
+    assert out["geminiOnly"]["aiSpeaking"] is True
+    assert out["geminiOnly"]["duckTier"] == "gemini"
+    assert out["geminiOnly"]["gain"] == pytest.approx(out["geminiDuck"])
     assert out["recovering"]["ducked"] is False
     assert out["recovering"]["recovering"] is True
     assert out["pipeline"]["pipelineActive"] is True
     assert out["pipeline"]["ducked"] is True
     assert out["afterPipe"]["pipelineActive"] is False
     assert out["afterPipe"]["recovering"] is True
+
+
+@pytest.mark.skipif(not _node_available(), reason="node required for SmartAIDucker unit tests")
+def test_user_barge_in_snaps_from_gemini_to_user_duck():
+    out = _run_ducker_js(
+        """
+        const d = new SmartAIDucker(new FakeMedia());
+        d.onGeminiSpeechStart();
+        const gemini = d.getState();
+        d.onUserSpeechStart();
+        const barge = d.getState();
+        return {
+          geminiGain: gemini.gain,
+          geminiTier: gemini.duckTier,
+          bargeGain: barge.gain,
+          bargeTier: barge.duckTier,
+          userDuck: d.opts.userDuckVolume,
+          geminiDuck: d.opts.geminiDuckVolume,
+        };
+        """
+    )
+    assert out["geminiTier"] == "gemini"
+    assert out["geminiGain"] == pytest.approx(out["geminiDuck"])
+    assert out["bargeTier"] == "user"
+    assert out["bargeGain"] == pytest.approx(out["userDuck"])
 
 
 @pytest.mark.skipif(not _node_available(), reason="node required for SmartAIDucker unit tests")
@@ -179,7 +213,7 @@ def test_crosstalk_cancels_recover_generation():
           ducked: after.ducked,
           recoveringAfter: after.recovering,
           gain: after.gain,
-          duckGain: d.opts.duckGain,
+          userDuck: d.opts.userDuckVolume,
         };
         """
     )
@@ -187,7 +221,7 @@ def test_crosstalk_cancels_recover_generation():
     assert out["genAfter"] > out["genDuringHold"]
     assert out["ducked"] is True
     assert out["recoveringAfter"] is False
-    assert out["gain"] == pytest.approx(out["duckGain"])
+    assert out["gain"] == pytest.approx(out["userDuck"])
 
 
 @pytest.mark.skipif(not _node_available(), reason="node required for SmartAIDucker unit tests")
@@ -280,6 +314,8 @@ def test_watch_html_wires_smart_ai_ducker():
     assert "conversation_ducking.js" not in body
     assert "ensureSmartDucker" in body
     assert "SmartAIDucker" in body
+    assert "USER_DUCK_VOLUME" in body or "userDuckVolume" in body
+    assert "GEMINI_DUCK_VOLUME" in body or "geminiDuckVolume" in body
     assert "maybeBindAirPodsOutput" in body
     assert "bindToAirPods" in body
     assert "DUCK_BT_OFFSET_MS" in body
@@ -310,6 +346,11 @@ def test_watch_serves_smart_ai_ducker_asset():
     assert "setSinkId" in js.text
     assert "sampleRate" in js.text
     assert "bluetoothOffsetMs" in js.text
+    assert "USER_DUCK_VOLUME" in js.text
+    assert "GEMINI_DUCK_VOLUME" in js.text
+    assert "linearRampToValueAtTime" in js.text
+    assert "onGeminiSpeechStart" in js.text
+    assert "_cutTo" in js.text
     assert "holdMs" in js.text
 
     page = client.get("/watch")

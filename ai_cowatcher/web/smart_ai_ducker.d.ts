@@ -1,6 +1,12 @@
 export type SmartAIDuckerOptions = {
+  userDuckVolume?: number;
+  geminiDuckVolume?: number;
+  userCutSec?: number;
+  geminiDuckSec?: number;
+  /** @deprecated Prefer userDuckVolume. */
   duckGain?: number;
   fullGain?: number;
+  /** @deprecated Prefer userCutSec. */
   duckAttackSec?: number;
   recoverySec?: number;
   holdMs?: number;
@@ -17,6 +23,7 @@ export type SmartAIDuckerState = {
   aiSpeaking: boolean;
   pipelineActive: boolean;
   ducked: boolean;
+  duckTier: "user" | "gemini" | "pipeline" | "none";
   gain: number;
   recovering: boolean;
   sinkId: string | null;
@@ -27,6 +34,10 @@ export type SmartAIDuckerState = {
 
 export declare const MIC_CONSTRAINTS: MediaStreamConstraints;
 export declare const UNIFIED_SAMPLE_RATE: number;
+export declare const USER_DUCK_VOLUME: number;
+export declare const GEMINI_DUCK_VOLUME: number;
+export declare const USER_CUT_SEC: number;
+export declare const GEMINI_DUCK_SEC: number;
 export declare function timeConstantFor(durationSec: number): number;
 export declare function findAirPodsOutput(
   devices: ReadonlyArray<MediaDeviceInfo>
@@ -64,6 +75,8 @@ export declare class SmartAIDucker {
   onUserSpeechEnd(): void;
   onAISpeechStart(): void;
   onAISpeechEnd(): void;
+  onGeminiSpeechStart(): void;
+  onGeminiSpeechEnd(): void;
   setPipelineActive(active: boolean): void;
   reset(forceImmediate?: boolean): void;
 }
@@ -76,6 +89,10 @@ declare global {
       SmartAIDucker?: typeof SmartAIDucker;
       MIC_CONSTRAINTS?: MediaStreamConstraints;
       UNIFIED_SAMPLE_RATE?: number;
+      USER_DUCK_VOLUME?: number;
+      GEMINI_DUCK_VOLUME?: number;
+      USER_CUT_SEC?: number;
+      GEMINI_DUCK_SEC?: number;
       DEFAULTS?: Record<string, number>;
       timeConstantFor?: typeof timeConstantFor;
       findAirPodsOutput?: typeof findAirPodsOutput;

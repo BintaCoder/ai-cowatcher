@@ -18,7 +18,11 @@
 
   /**
    * @typedef {object} SmartAIDuckerOptions
-   * @property {number} [duckGain=0.15] Floor while ducked (15%).
+   * @property {number} [userDuckVolume=0.20] Floor while user talks.
+   * @property {number} [geminiDuckVolume=0.05] Floor while Gemini TTS plays.
+   * @property {number} [userCutSec=0.02] Instant cut duration on Hold-to-talk.
+   * @property {number} [geminiDuckSec=0.2] Deep-duck ramp for Gemini.
+   * @property {number} [duckGain=0.20] Deprecated alias of userDuckVolume.
    * @property {number} [fullGain=1]
    * @property {number} [duckAttackSec=0.15] Fast fade-out.
    * @property {number} [recoverySec=0.6] Gentle fade-in.
@@ -47,10 +51,25 @@
 
   const UNIFIED_SAMPLE_RATE = 48000;
 
+  /** Movie volume while the user is talking (Hold to talk / VAD). */
+  const USER_DUCK_VOLUME = 0.2;
+  /** Movie volume while Gemini TTS is speaking (deep duck). */
+  const GEMINI_DUCK_VOLUME = 0.05;
+  /** Instant cut duration for Hold-to-talk (bypass exponential lag). */
+  const USER_CUT_SEC = 0.02;
+  /** Smooth deep-duck duration when Gemini starts. */
+  const GEMINI_DUCK_SEC = 0.2;
+
   const DEFAULTS = Object.freeze({
-    duckGain: 0.15,
+    userDuckVolume: USER_DUCK_VOLUME,
+    geminiDuckVolume: GEMINI_DUCK_VOLUME,
+    userCutSec: USER_CUT_SEC,
+    geminiDuckSec: GEMINI_DUCK_SEC,
+    /** @deprecated alias of userDuckVolume */
+    duckGain: USER_DUCK_VOLUME,
     fullGain: 1.0,
-    duckAttackSec: 0.15,
+    /** @deprecated alias of userCutSec */
+    duckAttackSec: USER_CUT_SEC,
     recoverySec: 0.6,
     holdMs: 1500,
     bluetoothOffsetMs: 150,
@@ -116,13 +135,34 @@
       }
       const o = options || {};
       this.mediaElement = mediaElement;
+      const userDuck = clamp01(
+        o.userDuckVolume != null
+          ? o.userDuckVolume
+          : o.duckGain != null
+            ? o.duckGain
+            : DEFAULTS.userDuckVolume
+      );
+      const userCut = Math.max(
+        0.005,
+        o.userCutSec != null
+          ? o.userCutSec
+          : o.duckAttackSec != null
+            ? o.duckAttackSec
+            : DEFAULTS.userCutSec
+      );
       this.opts = {
-        duckGain: clamp01(o.duckGain != null ? o.duckGain : DEFAULTS.duckGain),
-        fullGain: clamp01(o.fullGain != null ? o.fullGain : DEFAULTS.fullGain),
-        duckAttackSec: Math.max(
-          0.01,
-          o.duckAttackSec != null ? o.duckAttackSec : DEFAULTS.duckAttackSec
+        userDuckVolume: userDuck,
+        geminiDuckVolume: clamp01(
+          o.geminiDuckVolume != null ? o.geminiDuckVolume : DEFAULTS.geminiDuckVolume
         ),
+        userCutSec: userCut,
+        geminiDuckSec: Math.max(
+          0.02,
+          o.geminiDuckSec != null ? o.geminiDuckSec : DEFAULTS.geminiDuckSec
+        ),
+        duckGain: userDuck,
+        duckAttackSec: userCut,
+        fullGain: clamp01(o.fullGain != null ? o.fullGain : DEFAULTS.fullGain),
         recoverySec: Math.max(
           0.01,
           o.recoverySec != null ? o.recoverySec : DEFAULTS.recoverySec
@@ -208,6 +248,7 @@
         aiSpeaking: this._aiSpeaking,
         pipelineActive: this._pipelineActive,
         ducked: this._shouldDuck(),
+        duckTier: this._duckTier(),
         gain: this._lastGain,
         recovering: this._recovering,
         sinkId: this._sinkId,
@@ -441,11 +482,14 @@
 
     // ── integration hooks (AI SDK / VAD / UI) ──────────────────────────────
 
+    /**
+     * Hold-to-talk / user VAD — instant cut to USER_DUCK_VOLUME (bypasses setTargetAtTime).
+     */
     onUserSpeechStart() {
       this._assertAlive();
       if (!this._enabled) return;
       this._userSpeaking = true;
-      this._onActivityStart("user");
+      this._applyPriorityDuck("user");
     }
 
     onUserSpeechEnd() {
@@ -454,17 +498,28 @@
       this._onActivityEnd("user");
     }
 
+    /** Gemini / AI TTS started — deep-duck toward GEMINI_DUCK_VOLUME. */
     onAISpeechStart() {
       this._assertAlive();
       if (!this._enabled) return;
       this._aiSpeaking = true;
-      this._onActivityStart("ai");
+      this._applyPriorityDuck("ai");
     }
 
     onAISpeechEnd() {
       this._assertAlive();
       this._aiSpeaking = false;
       this._onActivityEnd("ai");
+    }
+
+    /** Alias for Gemini SDK naming. */
+    onGeminiSpeechStart() {
+      return this.onAISpeechStart();
+    }
+
+    /** Alias for Gemini SDK naming. */
+    onGeminiSpeechEnd() {
+      return this.onAISpeechEnd();
     }
 
     /**
@@ -475,7 +530,7 @@
       const next = Boolean(active);
       if (next === this._pipelineActive) return;
       this._pipelineActive = next;
-      if (next) this._onActivityStart("pipeline");
+      if (next) this._applyPriorityDuck("pipeline");
       else this._onActivityEnd("pipeline");
     }
 
@@ -539,14 +594,43 @@
     }
 
     /**
-     * Cross-talk / activity start: cancel any scheduled recover, lock ducked.
-     * @param {string} _who
+     * @returns {"user"|"gemini"|"pipeline"|"none"}
      */
-    _onActivityStart(_who) {
+    _duckTier() {
+      if (this._userSpeaking) return "user";
+      if (this._aiSpeaking) return "gemini";
+      if (this._pipelineActive) return "pipeline";
+      return "none";
+    }
+
+    /**
+     * Priority: user (20% instant) > Gemini (5% / 0.2s) > pipeline (20% instant).
+     * @returns {number}
+     */
+    _duckTarget() {
+      if (this._userSpeaking) return this.opts.userDuckVolume;
+      if (this._aiSpeaking) return this.opts.geminiDuckVolume;
+      if (this._pipelineActive) return this.opts.userDuckVolume;
+      return this.opts.fullGain;
+    }
+
+    /**
+     * Apply multi-tier duck from current speech flags.
+     * @param {string} reason
+     */
+    _applyPriorityDuck(reason) {
       this._clearHoldTimer();
       this._recovering = false;
       this._generation += 1;
-      this._rampTo(this.opts.duckGain, this.opts.duckAttackSec);
+      const target = this._duckTarget();
+      if (this._userSpeaking || reason === "user") {
+        // Instant cut — Hold to talk / barge-in over Gemini (no exponential lag).
+        this._cutTo(target, this.opts.userCutSec);
+      } else if (this._aiSpeaking) {
+        this._linearTo(target, this.opts.geminiDuckSec);
+      } else {
+        this._cutTo(target, this.opts.userCutSec);
+      }
       this._emitState();
     }
 
@@ -557,9 +641,8 @@
     _onActivityEnd(_who) {
       this._emitState();
       if (this._shouldDuck()) {
-        this._clearHoldTimer();
-        this._recovering = false;
-        this._rampTo(this.opts.duckGain, this.opts.duckAttackSec);
+        // Someone still active — re-apply priority (e.g. user ended, Gemini continues → deep duck).
+        this._applyPriorityDuck("end");
         return;
       }
       this._scheduleRecover();
@@ -568,9 +651,7 @@
     _reconcile(_why) {
       if (!this._enabled) return;
       if (this._shouldDuck()) {
-        this._clearHoldTimer();
-        this._recovering = false;
-        this._rampTo(this.opts.duckGain, this.opts.duckAttackSec);
+        this._applyPriorityDuck("reconcile");
       } else {
         this._scheduleRecover();
       }
@@ -607,6 +688,87 @@
     }
 
     /**
+     * Instant / near-instant cut for Hold-to-talk (cancels any recover curve).
+     * @param {number} target
+     * @param {number} durationSec
+     */
+    _cutTo(target, durationSec) {
+      const end = Math.min(1, Math.max(0, target));
+      this._lastGain = end;
+      const dur = Math.max(0.005, durationSec != null ? durationSec : USER_CUT_SEC);
+
+      if (this.programGain && this.ctx) {
+        const param = this.programGain.gain;
+        const now = this.ctx.currentTime;
+        try {
+          param.cancelScheduledValues(now);
+          param.setValueAtTime(param.value, now);
+          // Aggressive linear snap (~20ms) — avoids setTargetAtTime Bluetooth lag.
+          param.linearRampToValueAtTime(end, now + dur);
+        } catch (_) {
+          try {
+            param.cancelScheduledValues(now);
+            param.setValueAtTime(end, now);
+          } catch (_2) {
+            try {
+              param.value = end;
+            } catch (_3) {
+              /* ignore */
+            }
+          }
+        }
+      } else if (this._fallbackVolume) {
+        this._fadeElementVolume(end, dur);
+      }
+
+      if (this._onGainChange) {
+        try {
+          this._onGainChange(end);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+
+    /**
+     * Linear deep-duck for Gemini TTS clarity.
+     * @param {number} target
+     * @param {number} durationSec
+     */
+    _linearTo(target, durationSec) {
+      const end = Math.min(1, Math.max(0, target));
+      this._lastGain = end;
+      const dur = Math.max(0.02, durationSec != null ? durationSec : GEMINI_DUCK_SEC);
+
+      if (this.programGain && this.ctx) {
+        const param = this.programGain.gain;
+        const now = this.ctx.currentTime;
+        try {
+          param.cancelScheduledValues(now);
+          param.setValueAtTime(param.value, now);
+          param.linearRampToValueAtTime(end, now + dur);
+        } catch (_) {
+          try {
+            param.value = end;
+          } catch (_2) {
+            /* ignore */
+          }
+        }
+      } else if (this._fallbackVolume) {
+        this._fadeElementVolume(end, dur);
+      }
+
+      if (this._onGainChange) {
+        try {
+          this._onGainChange(end);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+
+    /**
+     * Gentle recover via setTargetAtTime (AirPods-friendly).
      * @param {number} target
      * @param {number} durationSec
      */
@@ -622,7 +784,7 @@
           param.setValueAtTime(param.value, now);
           const tau = timeConstantFor(durationSec);
           param.setTargetAtTime(end, now, tau);
-          const settleAt = now + Math.max(durationSec || 0.15, tau * 4);
+          const settleAt = now + Math.max(durationSec || 0.6, tau * 4);
           param.setValueAtTime(end, settleAt);
         } catch (_) {
           try {
@@ -692,6 +854,10 @@
     DEFAULTS,
     MIC_CONSTRAINTS,
     UNIFIED_SAMPLE_RATE,
+    USER_DUCK_VOLUME,
+    GEMINI_DUCK_VOLUME,
+    USER_CUT_SEC,
+    GEMINI_DUCK_SEC,
     timeConstantFor,
     findAirPodsOutput,
   };

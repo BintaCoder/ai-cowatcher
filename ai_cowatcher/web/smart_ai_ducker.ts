@@ -26,10 +26,18 @@ type MediaElementWithSink = HTMLMediaElement & {
 };
 
 export type SmartAIDuckerOptions = {
-  /** Floor while ducked (default 0.15). */
+  /** Floor while the user is talking (default 0.20). */
+  userDuckVolume?: number;
+  /** Floor while Gemini TTS is speaking (default 0.05). */
+  geminiDuckVolume?: number;
+  /** Instant cut duration on Hold-to-talk (default 0.02). */
+  userCutSec?: number;
+  /** Deep-duck ramp when Gemini starts (default 0.2). */
+  geminiDuckSec?: number;
+  /** @deprecated Prefer userDuckVolume. */
   duckGain?: number;
   fullGain?: number;
-  /** Fast fade-out duration seconds (default 0.15). */
+  /** @deprecated Prefer userCutSec. */
   duckAttackSec?: number;
   /** Gentle fade-in duration seconds (default 0.6). */
   recoverySec?: number;
@@ -57,6 +65,8 @@ export type SmartAIDuckerState = {
   aiSpeaking: boolean;
   pipelineActive: boolean;
   ducked: boolean;
+  /** "user" | "gemini" | "pipeline" | "none" */
+  duckTier: "user" | "gemini" | "pipeline" | "none";
   gain: number;
   recovering: boolean;
   sinkId: string | null;
@@ -83,10 +93,23 @@ export const MIC_CONSTRAINTS: MediaStreamConstraints = {
 /** Preferred unified graph rate for laptop + AirPods (A2DP / WebAudio). */
 export const UNIFIED_SAMPLE_RATE = 48000;
 
+/** Movie volume while the user is talking. */
+export const USER_DUCK_VOLUME = 0.2;
+/** Movie volume while Gemini TTS is speaking (deep duck). */
+export const GEMINI_DUCK_VOLUME = 0.05;
+/** Instant cut duration for Hold-to-talk. */
+export const USER_CUT_SEC = 0.02;
+/** Smooth deep-duck duration when Gemini starts. */
+export const GEMINI_DUCK_SEC = 0.2;
+
 const DEFAULTS = {
-  duckGain: 0.15,
+  userDuckVolume: USER_DUCK_VOLUME,
+  geminiDuckVolume: GEMINI_DUCK_VOLUME,
+  userCutSec: USER_CUT_SEC,
+  geminiDuckSec: GEMINI_DUCK_SEC,
+  duckGain: USER_DUCK_VOLUME,
   fullGain: 1.0,
-  duckAttackSec: 0.15,
+  duckAttackSec: USER_CUT_SEC,
   recoverySec: 0.6,
   holdMs: 1500,
   bluetoothOffsetMs: 150,
@@ -125,6 +148,10 @@ export class SmartAIDucker {
 
   readonly mediaElement: MediaElementWithSink;
   readonly opts: {
+    userDuckVolume: number;
+    geminiDuckVolume: number;
+    userCutSec: number;
+    geminiDuckSec: number;
     duckGain: number;
     fullGain: number;
     duckAttackSec: number;
@@ -167,10 +194,21 @@ export class SmartAIDucker {
       throw new TypeError("SmartAIDucker requires an HTMLMediaElement");
     }
     this.mediaElement = mediaElement as MediaElementWithSink;
+    const userDuck = clamp01(
+      options.userDuckVolume ?? options.duckGain ?? DEFAULTS.userDuckVolume
+    );
+    const userCut = Math.max(
+      0.005,
+      options.userCutSec ?? options.duckAttackSec ?? DEFAULTS.userCutSec
+    );
     this.opts = {
-      duckGain: clamp01(options.duckGain ?? DEFAULTS.duckGain),
+      userDuckVolume: userDuck,
+      geminiDuckVolume: clamp01(options.geminiDuckVolume ?? DEFAULTS.geminiDuckVolume),
+      userCutSec: userCut,
+      geminiDuckSec: Math.max(0.02, options.geminiDuckSec ?? DEFAULTS.geminiDuckSec),
+      duckGain: userDuck,
       fullGain: clamp01(options.fullGain ?? DEFAULTS.fullGain),
-      duckAttackSec: Math.max(0.01, options.duckAttackSec ?? DEFAULTS.duckAttackSec),
+      duckAttackSec: userCut,
       recoverySec: Math.max(0.01, options.recoverySec ?? DEFAULTS.recoverySec),
       holdMs: Math.max(0, options.holdMs ?? DEFAULTS.holdMs),
       bluetoothOffsetMs: Math.max(0, options.bluetoothOffsetMs ?? DEFAULTS.bluetoothOffsetMs),
@@ -220,6 +258,7 @@ export class SmartAIDucker {
       aiSpeaking: this._aiSpeaking,
       pipelineActive: this._pipelineActive,
       ducked: this._shouldDuck(),
+      duckTier: this._duckTier(),
       gain: this._lastGain,
       recovering: this._recovering,
       sinkId: this._sinkId,
@@ -440,12 +479,15 @@ export class SmartAIDucker {
     this._started = false;
   }
 
-  /** User VAD / PTT / SpeechRecognition → speech began. */
+  /**
+   * Hold-to-talk / user VAD — instant cut to USER_DUCK_VOLUME
+   * (bypasses setTargetAtTime to kill Bluetooth button lag).
+   */
   onUserSpeechStart(): void {
     this._assertAlive();
     if (!this._enabled) return;
     this._userSpeaking = true;
-    this._onActivityStart();
+    this._applyPriorityDuck("user");
   }
 
   /** User VAD / PTT / SpeechRecognition → speech ended. */
@@ -455,19 +497,29 @@ export class SmartAIDucker {
     this._onActivityEnd();
   }
 
-  /** AI TTS / streaming audio → playback began. */
+  /** AI / Gemini TTS → playback began (deep duck). */
   onAISpeechStart(): void {
     this._assertAlive();
     if (!this._enabled) return;
     this._aiSpeaking = true;
-    this._onActivityStart();
+    this._applyPriorityDuck("ai");
   }
 
-  /** AI TTS / streaming audio → playback ended. */
+  /** AI / Gemini TTS → playback ended. */
   onAISpeechEnd(): void {
     this._assertAlive();
     this._aiSpeaking = false;
     this._onActivityEnd();
+  }
+
+  /** Alias for Gemini SDK naming. */
+  onGeminiSpeechStart(): void {
+    this.onAISpeechStart();
+  }
+
+  /** Alias for Gemini SDK naming. */
+  onGeminiSpeechEnd(): void {
+    this.onAISpeechEnd();
   }
 
   /**
@@ -478,7 +530,7 @@ export class SmartAIDucker {
     const next = Boolean(active);
     if (next === this._pipelineActive) return;
     this._pipelineActive = next;
-    if (next) this._onActivityStart();
+    if (next) this._applyPriorityDuck("pipeline");
     else this._onActivityEnd();
   }
 
@@ -536,12 +588,36 @@ export class SmartAIDucker {
     return this._userSpeaking || this._aiSpeaking || this._pipelineActive;
   }
 
-  /** Cross-talk / activity start: cancel any scheduled recover, lock ducked. */
-  private _onActivityStart(): void {
+  private _duckTier(): "user" | "gemini" | "pipeline" | "none" {
+    if (this._userSpeaking) return "user";
+    if (this._aiSpeaking) return "gemini";
+    if (this._pipelineActive) return "pipeline";
+    return "none";
+  }
+
+  private _duckTarget(): number {
+    if (this._userSpeaking) return this.opts.userDuckVolume;
+    if (this._aiSpeaking) return this.opts.geminiDuckVolume;
+    if (this._pipelineActive) return this.opts.userDuckVolume;
+    return this.opts.fullGain;
+  }
+
+  /**
+   * Priority: user (20% instant) > Gemini (5% / 0.2s) > pipeline (20% instant).
+   * User barge-in while Gemini speaks snaps back to USER_DUCK_VOLUME immediately.
+   */
+  private _applyPriorityDuck(reason: string): void {
     this._clearHoldTimer();
     this._recovering = false;
     this._generation += 1;
-    this._rampTo(this.opts.duckGain, this.opts.duckAttackSec);
+    const target = this._duckTarget();
+    if (this._userSpeaking || reason === "user") {
+      this._cutTo(target, this.opts.userCutSec);
+    } else if (this._aiSpeaking) {
+      this._linearTo(target, this.opts.geminiDuckSec);
+    } else {
+      this._cutTo(target, this.opts.userCutSec);
+    }
     this._emitState();
   }
 
@@ -549,9 +625,7 @@ export class SmartAIDucker {
   private _onActivityEnd(): void {
     this._emitState();
     if (this._shouldDuck()) {
-      this._clearHoldTimer();
-      this._recovering = false;
-      this._rampTo(this.opts.duckGain, this.opts.duckAttackSec);
+      this._applyPriorityDuck("end");
       return;
     }
     this._scheduleRecover();
@@ -560,9 +634,7 @@ export class SmartAIDucker {
   private _reconcile(): void {
     if (!this._enabled) return;
     if (this._shouldDuck()) {
-      this._clearHoldTimer();
-      this._recovering = false;
-      this._rampTo(this.opts.duckGain, this.opts.duckAttackSec);
+      this._applyPriorityDuck("reconcile");
     } else {
       this._scheduleRecover();
     }
@@ -598,9 +670,78 @@ export class SmartAIDucker {
     }
   }
 
-  /**
-   * Smooth exponential-style gain via setTargetAtTime; cancel prior automation.
-   */
+  /** Instant / near-instant cut for Hold-to-talk (cancels recover curves). */
+  private _cutTo(target: number, durationSec: number): void {
+    const end = Math.min(1, Math.max(0, target));
+    this._lastGain = end;
+    const dur = Math.max(0.005, durationSec ?? USER_CUT_SEC);
+
+    if (this.programGain && this.ctx) {
+      const param = this.programGain.gain;
+      const now = this.ctx.currentTime;
+      try {
+        param.cancelScheduledValues(now);
+        param.setValueAtTime(param.value, now);
+        param.linearRampToValueAtTime(end, now + dur);
+      } catch {
+        try {
+          param.cancelScheduledValues(now);
+          param.setValueAtTime(end, now);
+        } catch {
+          try {
+            param.value = end;
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    } else if (this._fallbackVolume) {
+      this._fadeElementVolume(end, dur);
+    }
+
+    if (this._onGainChange) {
+      try {
+        this._onGainChange(end);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** Linear deep-duck for Gemini TTS clarity. */
+  private _linearTo(target: number, durationSec: number): void {
+    const end = Math.min(1, Math.max(0, target));
+    this._lastGain = end;
+    const dur = Math.max(0.02, durationSec ?? GEMINI_DUCK_SEC);
+
+    if (this.programGain && this.ctx) {
+      const param = this.programGain.gain;
+      const now = this.ctx.currentTime;
+      try {
+        param.cancelScheduledValues(now);
+        param.setValueAtTime(param.value, now);
+        param.linearRampToValueAtTime(end, now + dur);
+      } catch {
+        try {
+          param.value = end;
+        } catch {
+          /* ignore */
+        }
+      }
+    } else if (this._fallbackVolume) {
+      this._fadeElementVolume(end, dur);
+    }
+
+    if (this._onGainChange) {
+      try {
+        this._onGainChange(end);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** Gentle recover via setTargetAtTime (AirPods-friendly). */
   private _rampTo(target: number, durationSec: number): void {
     const end = Math.min(1, Math.max(0, target));
     this._lastGain = end;
@@ -613,7 +754,7 @@ export class SmartAIDucker {
         param.setValueAtTime(param.value, now);
         const tau = timeConstantFor(durationSec);
         param.setTargetAtTime(end, now, tau);
-        const settleAt = now + Math.max(durationSec || 0.15, tau * 4);
+        const settleAt = now + Math.max(durationSec || 0.6, tau * 4);
         param.setValueAtTime(end, settleAt);
       } catch {
         try {

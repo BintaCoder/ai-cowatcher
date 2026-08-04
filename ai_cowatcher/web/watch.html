@@ -367,9 +367,11 @@
     /** Rebuild SpeechRecognition periodically (handlers + internal buffers). */
     const RECREATE_AFTER_SESSIONS = 12;
     const MAX_STARTS_PER_MIN = 25;
-    /** SmartAIDucker timings — state-driven; no mic RMS / amplitude VAD. */
-    const DUCK_GAIN = 0.15;
-    const DUCK_ATTACK_SEC = 0.15;
+    /** SmartAIDucker timings — multi-tier duck; instant user cut for Hold-to-talk. */
+    const USER_DUCK_VOLUME = 0.2;
+    const GEMINI_DUCK_VOLUME = 0.05;
+    const DUCK_ATTACK_SEC = 0.02;
+    const GEMINI_DUCK_SEC = 0.2;
     const DUCK_RECOVER_SEC = 0.6;
     const DUCK_HOLD_MS = 1500;
     /** Extra recovery silence when AirPods / BT sink is bound (~150–200 ms air delay). */
@@ -546,8 +548,19 @@
         else if (!wantUser && smartDucker.isUserSpeaking) smartDucker.onUserSpeechEnd();
       } catch (_) { /* destroyed */ }
       try {
-        if (aiTtsActive && !smartDucker.isAISpeaking) smartDucker.onAISpeechStart();
-        else if (!aiTtsActive && smartDucker.isAISpeaking) smartDucker.onAISpeechEnd();
+        if (aiTtsActive && !smartDucker.isAISpeaking) {
+          if (typeof smartDucker.onGeminiSpeechStart === "function") {
+            smartDucker.onGeminiSpeechStart();
+          } else {
+            smartDucker.onAISpeechStart();
+          }
+        } else if (!aiTtsActive && smartDucker.isAISpeaking) {
+          if (typeof smartDucker.onGeminiSpeechEnd === "function") {
+            smartDucker.onGeminiSpeechEnd();
+          } else {
+            smartDucker.onAISpeechEnd();
+          }
+        }
       } catch (_) { /* destroyed */ }
       try {
         const snap = typeof smartDucker.getState === "function" ? smartDucker.getState() : null;
@@ -599,8 +612,10 @@
         if (!Ctor) return null;
         try {
           const ducker = new Ctor(player, {
-            duckGain: DUCK_GAIN,
-            duckAttackSec: DUCK_ATTACK_SEC,
+            userDuckVolume: USER_DUCK_VOLUME,
+            geminiDuckVolume: GEMINI_DUCK_VOLUME,
+            userCutSec: DUCK_ATTACK_SEC,
+            geminiDuckSec: GEMINI_DUCK_SEC,
             recoverySec: DUCK_RECOVER_SEC,
             holdMs: DUCK_HOLD_MS,
             bluetoothOffsetMs: DUCK_BT_OFFSET_MS,
