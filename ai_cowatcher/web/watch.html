@@ -372,6 +372,9 @@
     const DUCK_ATTACK_SEC = 0.15;
     const DUCK_RECOVER_SEC = 0.6;
     const DUCK_HOLD_MS = 1500;
+    /** Extra recovery silence when AirPods / BT sink is bound (~150–200 ms air delay). */
+    const DUCK_BT_OFFSET_MS = 150;
+    const DUCK_SAMPLE_RATE = 48000;
     /** After quieting program audio, re-open STT once gain has settled (does not restart mic stream). */
     const PROGRAM_BLEED_RESTART_MS = 480;
     /** Treat STT as "user" only after program was quieted (or show is not audible). */
@@ -600,12 +603,15 @@
             duckAttackSec: DUCK_ATTACK_SEC,
             recoverySec: DUCK_RECOVER_SEC,
             holdMs: DUCK_HOLD_MS,
+            bluetoothOffsetMs: DUCK_BT_OFFSET_MS,
+            sampleRate: DUCK_SAMPLE_RATE,
             enabled: duckEnabled(),
           });
           // Graph only — no openMic (SpeechRecognition / external VAD own the mic).
           await ducker.start();
           smartDucker = ducker;
           syncSmartDuckerFlags();
+          void maybeBindAirPodsOutput(ducker);
           return ducker;
         } catch (err) {
           if (typeof console !== "undefined" && console.warn) {
@@ -622,6 +628,34 @@
       } catch (_) {
         smartDuckerPromise = null;
         return null;
+      }
+    }
+
+    /**
+     * Query enumerateDevices for AirPods / BT output and lock video + AudioContext
+     * onto the same sinkId (avoids laptop-speaker vs earbud destination mismatch).
+     */
+    async function maybeBindAirPodsOutput(ducker) {
+      if (!ducker || typeof ducker.bindToAirPods !== "function") return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+      try {
+        // Labels require a prior permission grant; warm with a no-op getUserMedia if needed.
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const find =
+          (window.CowatcherAudio && window.CowatcherAudio.findAirPodsOutput)
+          || null;
+        const match = find
+          ? find(devices)
+          : devices.find(
+            (d) =>
+              d.kind === "audiooutput"
+              && /airpods|bluetooth|headset|buds/i.test(d.label || "")
+          );
+        if (match && match.deviceId) {
+          await ducker.bindToAirPods(match.deviceId);
+        }
+      } catch (_) {
+        /* sink binding is best-effort */
       }
     }
 

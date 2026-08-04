@@ -2,13 +2,13 @@
  * SmartAIDucker — state-driven conversation-aware program ducking.
  *
  * Duck when userSpeaking OR aiSpeaking (or optional pipeline hold).
- * Recover only after BOTH are silent for `holdMs` (default 1.5s).
+ * Recover only after BOTH are silent for `holdMs` (+ optional Bluetooth pad).
  *
- * No microphone amplitude metering — user speech comes from an external VAD
- * (e.g. @ricky0123/vad-web) or UI events (Hold to talk / STT). AI speech
- * comes from TTS / streaming SDK hooks.
- *
- * Graph: <video|audio> → MediaElementSource → GainNode → destination
+ * Bluetooth / AirPods Pro 2 defenses:
+ * - Unified AudioContext sampleRate (48000)
+ * - Dual setSinkId (videoElement + audioCtx) via bindToAirPods(deviceId)
+ * - Mic constraints: AEC/NS on, AGC off, latency ideal 10ms
+ * - Recovery hold padded for BT transport delay
  *
  * Browser: load via <script>, global `CowatcherAudio.SmartAIDucker`.
  * Node/tests: `require('./smart_ai_ducker.js')`.
@@ -23,6 +23,9 @@
    * @property {number} [duckAttackSec=0.15] Fast fade-out.
    * @property {number} [recoverySec=0.6] Gentle fade-in.
    * @property {number} [holdMs=1500] Absolute silence before recover.
+   * @property {number} [bluetoothOffsetMs=150] Extra hold while BT padding on.
+   * @property {boolean} [bluetoothPadding=false]
+   * @property {number} [sampleRate=48000] Unified AudioContext rate.
    * @property {AudioContext} [audioContext]
    * @property {(state: SmartAIDuckerState) => void} [onStateChange]
    * @property {(gain: number) => void} [onGainChange]
@@ -36,7 +39,13 @@
    * @property {boolean} ducked
    * @property {number} gain
    * @property {boolean} recovering
+   * @property {string|null} sinkId
+   * @property {boolean} bluetoothPadding
+   * @property {number} effectiveHoldMs
+   * @property {number|null} sampleRate
    */
+
+  const UNIFIED_SAMPLE_RATE = 48000;
 
   const DEFAULTS = Object.freeze({
     duckGain: 0.15,
@@ -44,14 +53,17 @@
     duckAttackSec: 0.15,
     recoverySec: 0.6,
     holdMs: 1500,
+    bluetoothOffsetMs: 150,
+    sampleRate: UNIFIED_SAMPLE_RATE,
   });
 
-  /** WebRTC-friendly mic constraints for an external VAD to reuse. */
+  /** Bluetooth-friendly mic constraints for Gemini / VAD / STT. */
   const MIC_CONSTRAINTS = Object.freeze({
     audio: Object.freeze({
       echoCancellation: true,
       noiseSuppression: true,
-      autoGainControl: true,
+      autoGainControl: false,
+      latency: Object.freeze({ ideal: 0.01 }),
     }),
     video: false,
   });
@@ -64,6 +76,35 @@
     return Math.max(0.02, (Number(durationSec) || 0.15) / 3);
   }
 
+  /**
+   * Pick AirPods / Bluetooth audiooutput from enumerateDevices().
+   * @param {MediaDeviceInfo[]} devices
+   * @returns {MediaDeviceInfo|null}
+   */
+  function findAirPodsOutput(devices) {
+    if (!devices || !devices.length) return null;
+    const outputs = [];
+    for (let i = 0; i < devices.length; i += 1) {
+      const d = devices[i];
+      if (d && d.kind === "audiooutput" && d.deviceId) outputs.push(d);
+    }
+    if (!outputs.length) return null;
+
+    for (let i = 0; i < outputs.length; i += 1) {
+      if (/airpods/i.test(outputs[i].label || "")) return outputs[i];
+    }
+    for (let i = 0; i < outputs.length; i += 1) {
+      if (
+        /bluetooth|headset|buds|galaxy buds|pixel buds|wh-\d|sony|bose/i.test(
+          outputs[i].label || ""
+        )
+      ) {
+        return outputs[i];
+      }
+    }
+    return null;
+  }
+
   class SmartAIDucker {
     /**
      * @param {HTMLMediaElement} mediaElement
@@ -73,11 +114,32 @@
       if (!mediaElement || typeof mediaElement.play !== "function") {
         throw new TypeError("SmartAIDucker requires an HTMLMediaElement");
       }
+      const o = options || {};
       this.mediaElement = mediaElement;
-      this.opts = Object.assign({}, DEFAULTS, options || {});
+      this.opts = {
+        duckGain: clamp01(o.duckGain != null ? o.duckGain : DEFAULTS.duckGain),
+        fullGain: clamp01(o.fullGain != null ? o.fullGain : DEFAULTS.fullGain),
+        duckAttackSec: Math.max(
+          0.01,
+          o.duckAttackSec != null ? o.duckAttackSec : DEFAULTS.duckAttackSec
+        ),
+        recoverySec: Math.max(
+          0.01,
+          o.recoverySec != null ? o.recoverySec : DEFAULTS.recoverySec
+        ),
+        holdMs: Math.max(0, o.holdMs != null ? o.holdMs : DEFAULTS.holdMs),
+        bluetoothOffsetMs: Math.max(
+          0,
+          o.bluetoothOffsetMs != null ? o.bluetoothOffsetMs : DEFAULTS.bluetoothOffsetMs
+        ),
+        sampleRate: Math.max(
+          8000,
+          o.sampleRate != null ? o.sampleRate : DEFAULTS.sampleRate
+        ),
+      };
 
       /** @type {AudioContext | null} */
-      this.ctx = (options && options.audioContext) || null;
+      this.ctx = o.audioContext || null;
       /** @type {MediaElementAudioSourceNode | null} */
       this._mediaSource = null;
       /** @type {GainNode | null} */
@@ -99,16 +161,15 @@
       this._lastGain = this.opts.fullGain;
       this._generation = 0;
 
-      this._onStateChange =
-        options && typeof options.onStateChange === "function"
-          ? options.onStateChange
-          : null;
-      this._onGainChange =
-        options && typeof options.onGainChange === "function"
-          ? options.onGainChange
-          : null;
+      this._bluetoothPadding = o.bluetoothPadding === true;
+      /** @type {string|null} */
+      this._sinkId = null;
 
-      /** Optional mic stream for external VAD (owned if we created it). */
+      this._onStateChange =
+        typeof o.onStateChange === "function" ? o.onStateChange : null;
+      this._onGainChange =
+        typeof o.onGainChange === "function" ? o.onGainChange : null;
+
       /** @type {MediaStream | null} */
       this.micStream = null;
       this._ownsMic = false;
@@ -132,6 +193,15 @@
       return this._lastGain;
     }
 
+    get sinkId() {
+      return this._sinkId;
+    }
+
+    getEffectiveHoldMs() {
+      const pad = this._bluetoothPadding ? this.opts.bluetoothOffsetMs : 0;
+      return this.opts.holdMs + pad;
+    }
+
     getState() {
       return {
         userSpeaking: this._userSpeaking,
@@ -140,6 +210,10 @@
         ducked: this._shouldDuck(),
         gain: this._lastGain,
         recovering: this._recovering,
+        sinkId: this._sinkId,
+        bluetoothPadding: this._bluetoothPadding,
+        effectiveHoldMs: this.getEffectiveHoldMs(),
+        sampleRate: this.ctx ? this.ctx.sampleRate : null,
       };
     }
 
@@ -159,8 +233,7 @@
     }
 
     /**
-     * Wire video → GainNode. Optionally open mic with echoCancellation for
-     * an external VAD (does NOT start amplitude metering).
+     * Wire video → GainNode at unified sampleRate. Optionally open mic.
      * @param {{ openMic?: boolean }} [opts]
      */
     async start(opts) {
@@ -170,7 +243,13 @@
       const AC = root.AudioContext || root.webkitAudioContext;
       if (!AC) throw new Error("Web Audio API unavailable");
 
-      if (!this.ctx) this.ctx = new AC();
+      if (!this.ctx) {
+        try {
+          this.ctx = new AC({ sampleRate: this.opts.sampleRate });
+        } catch (_) {
+          this.ctx = new AC();
+        }
+      }
       if (this.ctx.state === "suspended") {
         try {
           await this.ctx.resume();
@@ -199,6 +278,10 @@
         }
       }
 
+      if (this._sinkId) {
+        await this._applySinkId(this._sinkId);
+      }
+
       if (opts && opts.openMic) {
         await this.ensureMicStream();
       }
@@ -208,7 +291,52 @@
     }
 
     /**
-     * Acquire (once) a mic stream with WebRTC echoCancellation for external VAD.
+     * Force video + AudioContext onto the same AirPods / BT output deviceId.
+     * Enables Bluetooth recovery padding.
+     * @param {string} deviceId
+     */
+    async bindToAirPods(deviceId) {
+      this._assertAlive();
+      const id = String(deviceId || "").trim();
+      if (!id) throw new TypeError("bindToAirPods requires a non-empty deviceId");
+      this._sinkId = id;
+      this._bluetoothPadding = true;
+      if (!this.ctx) {
+        this._emitState();
+        return;
+      }
+      await this._applySinkId(id);
+      this._emitState();
+    }
+
+    /** Clear dual sink binding (default OS output). */
+    async clearSinkBinding() {
+      this._assertAlive();
+      this._sinkId = null;
+      await this._applySinkId("");
+      this._emitState();
+    }
+
+    /**
+     * Toggle Bluetooth recovery padding, or pass a number to set offset ms.
+     * @param {boolean|number} enabledOrOffsetMs
+     */
+    setBluetoothPadding(enabledOrOffsetMs) {
+      this._assertAlive();
+      if (typeof enabledOrOffsetMs === "number") {
+        this.opts.bluetoothOffsetMs = Math.max(0, enabledOrOffsetMs);
+        this._bluetoothPadding = enabledOrOffsetMs > 0;
+      } else {
+        this._bluetoothPadding = Boolean(enabledOrOffsetMs);
+      }
+      if (this._recovering && !this._shouldDuck()) {
+        this._scheduleRecover();
+      }
+      this._emitState();
+    }
+
+    /**
+     * Acquire (once) a mic stream with Bluetooth-friendly constraints.
      * @returns {Promise<MediaStream | null>}
      */
     async ensureMicStream() {
@@ -222,14 +350,27 @@
         this._ownsMic = true;
         return this.micStream;
       } catch (_) {
-        this.micStream = null;
-        this._ownsMic = false;
-        return null;
+        try {
+          this.micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: false,
+            },
+            video: false,
+          });
+          this._ownsMic = true;
+          return this.micStream;
+        } catch (_2) {
+          this.micStream = null;
+          this._ownsMic = false;
+          return null;
+        }
       }
     }
 
     /**
-     * Mute/unmute owned mic tracks without stopping them (frees hardware for STT).
+     * Mute/unmute owned mic tracks without stopping them.
      * @param {boolean} muted
      */
     setMicMuted(muted) {
@@ -259,10 +400,6 @@
       }
     }
 
-    /**
-     * Pause recovery / ducking without destroying the graph.
-     * Does not clear speech flags — call speech-end hooks or reset() first if needed.
-     */
     stop() {
       this._clearHoldTimer();
       this._recovering = false;
@@ -300,20 +437,10 @@
       this._mediaSource = null;
       this.programGain = null;
       this._started = false;
-
-      if (this.ctx) {
-        try {
-          // Do not close shared contexts passed in; only close if we created it
-          // and nothing else needs it. Leave open to avoid Safari quirks — GC on nav.
-        } catch (_) {
-          /* ignore */
-        }
-      }
     }
 
     // ── integration hooks (AI SDK / VAD / UI) ──────────────────────────────
 
-    /** User started speaking (Silero / @ricky0123/vad-web / Hold-to-talk). */
     onUserSpeechStart() {
       this._assertAlive();
       if (!this._enabled) return;
@@ -321,14 +448,12 @@
       this._onActivityStart("user");
     }
 
-    /** User stopped speaking (VAD end / release Hold-to-talk). */
     onUserSpeechEnd() {
       this._assertAlive();
       this._userSpeaking = false;
       this._onActivityEnd("user");
     }
 
-    /** AI / TTS / streamed voice started. */
     onAISpeechStart() {
       this._assertAlive();
       if (!this._enabled) return;
@@ -336,7 +461,6 @@
       this._onActivityStart("ai");
     }
 
-    /** AI / TTS finished. */
     onAISpeechEnd() {
       this._assertAlive();
       this._aiSpeaking = false;
@@ -344,7 +468,6 @@
     }
 
     /**
-     * Optional: duck while /ask is in-flight (thinking) before TTS starts.
      * @param {boolean} active
      */
     setPipelineActive(active) {
@@ -356,7 +479,7 @@
       else this._onActivityEnd("pipeline");
     }
 
-    /** Clear all speech flags and unduck after hold (or immediately if force). */
+    /** @param {boolean} [forceImmediate] */
     reset(forceImmediate) {
       this._assertAlive();
       this._userSpeaking = false;
@@ -373,6 +496,37 @@
     }
 
     // ── internals ──────────────────────────────────────────────────────────
+
+    /**
+     * @param {string} deviceId
+     */
+    async _applySinkId(deviceId) {
+      const el = this.mediaElement;
+      const ctx = this.ctx;
+      const tasks = [];
+
+      if (el && typeof el.setSinkId === "function") {
+        tasks.push(
+          el.setSinkId(deviceId).catch((err) => {
+            if (typeof console !== "undefined" && console.warn) {
+              console.warn("[SmartAIDucker] videoElement.setSinkId failed", err);
+            }
+          })
+        );
+      }
+
+      if (ctx && typeof ctx.setSinkId === "function") {
+        tasks.push(
+          ctx.setSinkId(deviceId).catch((err) => {
+            if (typeof console !== "undefined" && console.warn) {
+              console.warn("[SmartAIDucker] audioCtx.setSinkId failed", err);
+            }
+          })
+        );
+      }
+
+      if (tasks.length) await Promise.all(tasks);
+    }
 
     _assertAlive() {
       if (this._destroyed) {
@@ -397,13 +551,12 @@
     }
 
     /**
-     * Activity end: only recover when EVERYONE is silent, after holdMs.
+     * Activity end: only recover when EVERYONE is silent, after hold (+ BT pad).
      * @param {string} _who
      */
     _onActivityEnd(_who) {
       this._emitState();
       if (this._shouldDuck()) {
-        // Still someone speaking — stay ducked; cancel recover if any.
         this._clearHoldTimer();
         this._recovering = false;
         this._rampTo(this.opts.duckGain, this.opts.duckAttackSec);
@@ -429,12 +582,12 @@
       if (!this._enabled || this._shouldDuck()) return;
 
       const gen = this._generation;
+      const hold = this.getEffectiveHoldMs();
       this._recovering = true;
       this._emitState();
 
       this._holdTimer = setTimeout(() => {
         this._holdTimer = null;
-        // Stale timer (cross-talk reset bumped generation) — abort.
         if (gen !== this._generation) return;
         if (this._destroyed || !this._enabled || this._shouldDuck()) {
           this._recovering = false;
@@ -443,7 +596,7 @@
         this._recovering = false;
         this._rampTo(this.opts.fullGain, this.opts.recoverySec);
         this._emitState();
-      }, this.opts.holdMs);
+      }, hold);
     }
 
     _clearHoldTimer() {
@@ -454,7 +607,6 @@
     }
 
     /**
-     * Smooth exponential-style gain via setTargetAtTime; cancel prior automation.
      * @param {number} target
      * @param {number} durationSec
      */
@@ -466,12 +618,10 @@
         const param = this.programGain.gain;
         const now = this.ctx.currentTime;
         try {
-          // Cross-talk reset: kill any in-flight recover curve immediately.
           param.cancelScheduledValues(now);
           param.setValueAtTime(param.value, now);
           const tau = timeConstantFor(durationSec);
           param.setTargetAtTime(end, now, tau);
-          // Settle exactly after ~4τ so we don't drift forever toward target.
           const settleAt = now + Math.max(durationSec || 0.15, tau * 4);
           param.setValueAtTime(end, settleAt);
         } catch (_) {
@@ -531,11 +681,19 @@
     }
   }
 
+  function clamp01(n) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return 0.15;
+    return Math.max(0, Math.min(1, x));
+  }
+
   const api = {
     SmartAIDucker,
     DEFAULTS,
     MIC_CONSTRAINTS,
+    UNIFIED_SAMPLE_RATE,
     timeConstantFor,
+    findAirPodsOutput,
   };
 
   if (typeof module !== "undefined" && module.exports) {

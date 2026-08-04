@@ -32,7 +32,7 @@ def _run_ducker_js(snippet: str) -> dict:
     """Evaluate SmartAIDucker via Node (CommonJS export) with a fake media element."""
     script = f"""
 const api = require({json.dumps(str(_DUCKER_JS))});
-const {{ SmartAIDucker, DEFAULTS, MIC_CONSTRAINTS, timeConstantFor }} = api;
+const {{ SmartAIDucker, DEFAULTS, MIC_CONSTRAINTS, timeConstantFor, findAirPodsOutput, UNIFIED_SAMPLE_RATE }} = api;
 
 class FakeMedia {{
   constructor() {{
@@ -94,8 +94,12 @@ def test_defaults_and_mic_constraints():
           holdMs: DEFAULTS.holdMs,
           duckAttack: DEFAULTS.duckAttackSec,
           recovery: DEFAULTS.recoverySec,
+          btOffset: DEFAULTS.bluetoothOffsetMs,
+          sampleRate: DEFAULTS.sampleRate,
           echo: MIC_CONSTRAINTS.audio.echoCancellation,
           ns: MIC_CONSTRAINTS.audio.noiseSuppression,
+          agc: MIC_CONSTRAINTS.audio.autoGainControl,
+          latencyIdeal: MIC_CONSTRAINTS.audio.latency.ideal,
           tau: timeConstantFor(0.15),
         };
         """
@@ -104,8 +108,12 @@ def test_defaults_and_mic_constraints():
     assert out["holdMs"] == 1500
     assert out["duckAttack"] == pytest.approx(0.15)
     assert out["recovery"] == pytest.approx(0.6)
+    assert out["btOffset"] == 150
+    assert out["sampleRate"] == 48000
     assert out["echo"] is True
     assert out["ns"] is True
+    assert out["agc"] is False
+    assert out["latencyIdeal"] == pytest.approx(0.01)
     assert out["tau"] == pytest.approx(0.05)
 
 
@@ -207,12 +215,75 @@ def test_hold_then_recover_gain():
     assert out["gain"] == pytest.approx(out["full"])
 
 
+@pytest.mark.skipif(not _node_available(), reason="node required for SmartAIDucker unit tests")
+def test_bluetooth_recovery_padding_and_sink_bind():
+    out = _run_ducker_js(
+        """
+        const d = new SmartAIDucker(new FakeMedia(), {
+          holdMs: 1500,
+          bluetoothOffsetMs: 200,
+        });
+        const base = d.getEffectiveHoldMs();
+        d.setBluetoothPadding(true);
+        const padded = d.getEffectiveHoldMs();
+        const sinks = [];
+        d.mediaElement.setSinkId = (id) => { sinks.push('el:' + id); return Promise.resolve(); };
+        // Simulate AudioContext.setSinkId without real Web Audio.
+        d.ctx = { setSinkId: (id) => { sinks.push('ctx:' + id); return Promise.resolve(); } };
+        return d.bindToAirPods('airpods-device-1').then(() => {
+          const st = d.getState();
+          return {
+            base,
+            padded,
+            effective: st.effectiveHoldMs,
+            padding: st.bluetoothPadding,
+            sinkId: st.sinkId,
+            sinks,
+            unified: UNIFIED_SAMPLE_RATE,
+          };
+        });
+        """
+    )
+    assert out["base"] == 1500
+    assert out["padded"] == 1700
+    assert out["effective"] == 1700
+    assert out["padding"] is True
+    assert out["sinkId"] == "airpods-device-1"
+    assert "el:airpods-device-1" in out["sinks"]
+    assert "ctx:airpods-device-1" in out["sinks"]
+    assert out["unified"] == 48000
+
+
+@pytest.mark.skipif(not _node_available(), reason="node required for SmartAIDucker unit tests")
+def test_find_airpods_output_helper():
+    out = _run_ducker_js(
+        """
+        const devices = [
+          { kind: 'audioinput', deviceId: 'mic', label: 'MacBook Mic' },
+          { kind: 'audiooutput', deviceId: 'speakers', label: 'MacBook Speakers' },
+          { kind: 'audiooutput', deviceId: 'buds', label: 'Binta\\'s AirPods Pro' },
+        ];
+        const hit = findAirPodsOutput(devices);
+        const none = findAirPodsOutput([
+          { kind: 'audiooutput', deviceId: 'spk', label: 'Built-in Output' },
+        ]);
+        return { id: hit && hit.deviceId, none };
+        """
+    )
+    assert out["id"] == "buds"
+    assert out["none"] is None
+
+
 def test_watch_html_wires_smart_ai_ducker():
     body = _WATCH_HTML.read_text(encoding="utf-8")
     assert "/watch/smart_ai_ducker.js" in body
     assert "conversation_ducking.js" not in body
     assert "ensureSmartDucker" in body
     assert "SmartAIDucker" in body
+    assert "maybeBindAirPodsOutput" in body
+    assert "bindToAirPods" in body
+    assert "DUCK_BT_OFFSET_MS" in body
+    assert "DUCK_SAMPLE_RATE" in body
     assert "processVadRms" not in body
     assert "vadSpeechActive" not in body
     assert "setDuckReason" in body
@@ -234,9 +305,15 @@ def test_watch_serves_smart_ai_ducker_asset():
     assert "cancelScheduledValues" in js.text
     assert "setTargetAtTime" in js.text
     assert "echoCancellation" in js.text
+    assert "autoGainControl: false" in js.text or "autoGainControl:!1" in js.text.replace(" ", "")
+    assert "bindToAirPods" in js.text
+    assert "setSinkId" in js.text
+    assert "sampleRate" in js.text
+    assert "bluetoothOffsetMs" in js.text
     assert "holdMs" in js.text
 
     page = client.get("/watch")
     assert page.status_code == 200
     assert "/watch/smart_ai_ducker.js" in page.text
     assert "processVadRms" not in page.text
+    assert "maybeBindAirPodsOutput" in page.text
