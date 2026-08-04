@@ -24,6 +24,7 @@ router = APIRouter(tags=["watch"])
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 _WATCH_HTML = _WEB_DIR / "watch.html"
 _CONVERSATION_DUCKING_JS = _WEB_DIR / "conversation_ducking.js"
+_SMART_AI_DUCKER_JS = _WEB_DIR / "smart_ai_ducker.js"
 
 _session_factory: sessionmaker | None = None
 
@@ -62,11 +63,23 @@ async def watch_page() -> HTMLResponse:
 
 @router.get("/watch/conversation_ducking.js", include_in_schema=False)
 async def watch_conversation_ducking_js() -> FileResponse:
-    """Pure ducking helpers shared by /watch (VAD thresholds, gain targets)."""
+    """Deprecated RMS helpers (kept for older bookmarks; /watch loads SmartAIDucker)."""
     if not _CONVERSATION_DUCKING_JS.is_file():
         raise HTTPException(status_code=500, detail="Ducking helper asset missing")
     return FileResponse(
         _CONVERSATION_DUCKING_JS,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/watch/smart_ai_ducker.js", include_in_schema=False)
+async def watch_smart_ai_ducker_js() -> FileResponse:
+    """State-driven SmartAIDucker (VAD/TTS hooks → GainNode; no amplitude metering)."""
+    if not _SMART_AI_DUCKER_JS.is_file():
+        raise HTTPException(status_code=500, detail="SmartAIDucker asset missing")
+    return FileResponse(
+        _SMART_AI_DUCKER_JS,
         media_type="application/javascript",
         headers={"Cache-Control": "no-cache"},
     )

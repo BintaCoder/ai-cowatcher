@@ -78,11 +78,13 @@ def test_watch_page_served(watch_client):
     assert "speakOnce" in response.text
     assert "duckWhileTalking" in response.text
     assert "setDuckReason" in response.text
-    assert "ensureAudioSession" in response.text
+    assert "ensureSmartDucker" in response.text
     assert "questionInput" in response.text
     assert "/ask/stream" in response.text
     assert "streamAsk" in response.text
-    assert "/watch/conversation_ducking.js" in response.text
+    assert "/watch/smart_ai_ducker.js" in response.text
+    assert "conversation_ducking.js" not in response.text
+    assert "processVadRms" not in response.text
     # Auto-listen remains opt-in for latency isolation tests.
     assert "cowatcher.auto_listen_mic" in response.text
     assert 'id="holdTalkBtn"' in response.text

@@ -9,9 +9,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ai_cowatcher.config import Settings
-from ai_cowatcher.main import create_app
-
 _ROOT = Path(__file__).resolve().parents[1]
 _DUCK_JS = _ROOT / "ai_cowatcher" / "web" / "conversation_ducking.js"
 
@@ -129,7 +126,20 @@ def test_vad_threshold_and_hangover():
 
 
 def test_watch_serves_ducking_helpers_and_session_hooks():
-    app = create_app(Settings(MOCK_MODE=True))
+    """Legacy RMS helper asset remains served; /watch no longer loads it."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from ai_cowatcher.api.watch_routes import (
+        watch_conversation_ducking_js,
+        watch_page,
+        watch_smart_ai_ducker_js,
+    )
+
+    app = FastAPI()
+    app.add_api_route("/watch", watch_page, methods=["GET"])
+    app.add_api_route("/watch/conversation_ducking.js", watch_conversation_ducking_js, methods=["GET"])
+    app.add_api_route("/watch/smart_ai_ducker.js", watch_smart_ai_ducker_js, methods=["GET"])
     client = TestClient(app)
 
     js = client.get("/watch/conversation_ducking.js")
@@ -138,24 +148,20 @@ def test_watch_serves_ducking_helpers_and_session_hooks():
     assert "computeRms" in js.text
     assert "echoCancellation" in js.text
     assert "DUCK_GAIN" in js.text
+    assert "DEPRECATED" in js.text
 
     page = client.get("/watch")
     assert page.status_code == 200
     body = page.text
-    assert "/watch/conversation_ducking.js" in body
-    assert "ensureAudioSession" in body
-    assert "applyUnifiedGains" in body
-    assert "createMediaElementSource" in body
-    assert "programGain" in body
-    assert "vadSpeechActive" in body
-    assert "processVadRms" in body
+    assert "/watch/smart_ai_ducker.js" in body
+    assert "conversation_ducking.js" not in body
+    assert "ensureSmartDucker" in body
     assert "setDuckReason" in body
+    assert "processVadRms" not in body
     assert "duckWhileTalking" in body
-    # Auto-listen stays off by default (testing-friendly).
     assert 'id="autoListenMic"' in body
     assert "cowatcher.auto_listen_mic" in body
     assert 'id="holdTalkBtn"' in body
     assert "startPushToTalk" in body
     assert 'setDuckReason("ptt"' in body or "setDuckReason(\"ptt\"" in body
-    # Must not barge-in cancel TTS solely for VAD ducking.
-    assert "does not cancel speech" in body or "Does not cancel" in body
+    assert "does not cancel" in body.lower()

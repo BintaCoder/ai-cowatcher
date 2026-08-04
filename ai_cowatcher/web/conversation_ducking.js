@@ -1,4 +1,8 @@
 /**
+ * DEPRECATED — RMS / amplitude helpers from the first conversation-ducking pass.
+ * /watch now uses SmartAIDucker (smart_ai_ducker.js): state hooks only, no mic metering.
+ * Kept for unit-test compatibility and older bookmarks of /watch/conversation_ducking.js.
+ *
  * Pure helpers for conversation-aware (VAD + gain) ducking on /watch.
  * Loaded before the inline watch page script; also unit-testable in isolation.
  *
