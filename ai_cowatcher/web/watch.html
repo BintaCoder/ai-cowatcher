@@ -202,19 +202,27 @@
           <span id="listenBadgeText">Mic idle</span>
         </span>
         <label class="nav-toggle"><input id="navigationMode" type="checkbox" checked /> Navigate mode (jump to moments)</label>
-        <label class="nav-toggle" title="Lower video volume while you talk or wait for an answer">
+        <label class="nav-toggle" title="VAD gain-duck program audio + TTS while you talk (never restarts the mic stream)">
           <input id="duckWhileTalking" type="checkbox" checked /> Duck volume while talking
+        </label>
+        <label
+          class="nav-toggle"
+          title="Hands-free wake word (Hey). Off by default for latency/quality tests — type questions instead. Safe with conversation duck (gain-only; mic/AudioContext stay warm)."
+        >
+          <input id="autoListenMic" type="checkbox" /> Auto listen (wake word)
         </label>
       </div>
       <div class="toolbar">
-        <input id="questionInput" type="text" placeholder="Voice: “Hey, who’s that?” · or type here" autocomplete="off" />
+        <input id="questionInput" type="text" placeholder="Type a question · or enable Auto listen for “Hey…”" autocomplete="off" />
         <button id="sendBtn" type="button" disabled>Ask</button>
       </div>
       <p class="hint">
-        Voice needs the wake word <strong>Hey</strong> first, then the question in the same phrase
-        (e.g. <strong>Hey, who’s that?</strong> · <strong>Hey what just happened?</strong> · <strong>Hey, go to 10:00</strong>).
-        Program audio is ignored unless it contains “Hey”. Typing does <em>not</em> need the wake word.
-        Duck volume lowers the show while you talk / get an answer; headphones still help.
+        <strong>Latency / quality testing:</strong> leave <em>Auto listen</em> off and type questions
+        (or enable it for hands-free voice). Voice needs the wake word
+        <strong>Hey</strong> first in the same phrase when auto listen is on
+        (e.g. <strong>Hey, who’s that?</strong>). Typing never needs the wake word.
+        Ducking uses a once-per-session mic + gain ramps (video + answer voice), not stream restarts.
+        Headphones still help against program bleed.
       </p>
       <div id="status" class="status">Pick a title to start.</div>
     </section>
@@ -232,6 +240,7 @@
   </div>
 
 
+  <script src="/watch/conversation_ducking.js"></script>
   <script>
     const player = document.getElementById("player");
     const titleSelect = document.getElementById("titleSelect");
@@ -243,6 +252,7 @@
     const questionInput = document.getElementById("questionInput");
     const navigationMode = document.getElementById("navigationMode");
     const duckWhileTalking = document.getElementById("duckWhileTalking");
+    const autoListenMic = document.getElementById("autoListenMic");
     const statusEl = document.getElementById("status");
     const questionText = document.getElementById("questionText");
     const answerText = document.getElementById("answerText");
@@ -253,6 +263,8 @@
     const USER_ID = "web-viewer";
     const LS_PERSONA = "cowatcher.persona_id";
     const LS_GENDER = "cowatcher.companion_gender";
+    /** Continuous auto-listen; default off for latency/quality tests. */
+    const LS_AUTO_LISTEN = "cowatcher.auto_listen_mic";
     /** Persona TTS presets (rate / pitch) — mirrors server persona JSON. */
     const PERSONA_TTS = {
       witty_friend: { rate: 1.06, pitch: 1.05 },
@@ -262,6 +274,11 @@
 
     function loadCompanionPrefs() {
       try {
+        // Default false when key missing — no continuous ambient mic (isolation tests).
+        if (autoListenMic) {
+          const raw = localStorage.getItem(LS_AUTO_LISTEN);
+          autoListenMic.checked = raw === "1" || raw === "true";
+        }
         const p = localStorage.getItem(LS_PERSONA);
         if (p && personaSelect && [...personaSelect.options].some((o) => o.value === p)) {
           personaSelect.value = p;
@@ -347,17 +364,28 @@
     /** Rebuild SpeechRecognition periodically (handlers + internal buffers). */
     const RECREATE_AFTER_SESSIONS = 12;
     const MAX_STARTS_PER_MIN = 25;
-    /** Volume duck while user talks / ask / TTS (conversation-awareness style). */
-    const DUCK_FRACTION = 0.2;
-    /** Milder program volume while mic is open so show dialogue is less likely to trigger STT. */
-    const AMBIENT_DUCK_FRACTION = 0.48;
-    const DUCK_MIN = 0.08;
-    const VOLUME_FADE_MS = 280;
-    const SPEECH_UNDUCK_DELAY_MS = 450;
-    /** After quieting program audio, re-open mic once volume has settled. */
+    /** Conversation duck config (VAD + gain ramps) — from conversation_ducking.js. */
+    const DUCK = (window.CowatcherDucking && window.CowatcherDucking.DUCK_CONFIG)
+      ? window.CowatcherDucking.DUCK_CONFIG
+      : {
+          DUCK_GAIN: 0.15,
+          AMBIENT_GAIN: 0.48,
+          SPEECH_HANGOVER_MS: 500,
+          RAMP_DOWN_S: 0.15,
+          RAMP_UP_S: 0.3,
+          VAD_RMS_THRESHOLD: 0.04,
+          VAD_MIN_THRESHOLD: 0.028,
+          VAD_THRESHOLD_MARGIN: 0.016,
+          VAD_NOISE_ALPHA: 0.03,
+          VAD_POLL_MS: 40,
+          VOLUME_FALLBACK_MIN: 0.08,
+        };
+    /** After quieting program audio, re-open STT once gain has settled (does not restart mic stream). */
     const PROGRAM_BLEED_RESTART_MS = 480;
     /** Treat STT as "user" only after program was quieted (or show is not audible). */
     const USER_LISTEN_WINDOW_MS = 6000;
+    /** Legacy rAF volume fade when Web Audio graph is not yet available. */
+    const VOLUME_FADE_MS = 280;
 
     const NAV_INTENT_RE = /\b(go to|jump to|skip to|take me to|show me|find|where does|where is|when does|rewind|fast[\s-]?forward|seek)\b/i;
     const JOKE_INTENT_RE = /\b(tell me a joke|got a (?:good )?joke|make me laugh|say something funny|one[\s-]?liner|be funny|any jokes?|jokes?)\b/i;
@@ -472,10 +500,13 @@
     let activeStreamAbort = null;
     let activeSpeaker = null;
 
-    // Conversation-awareness volume duck ----------
-    // Note: browser SpeechRecognition cannot true AEC (echo-cancel) HTML <video> audio.
-    // We quiet the program when listening / when the mic first hears *anything*, then only
-    // treat later speech as the user. TTS already mutes the mic while the app speaks.
+    // Conversation-aware ducking (VAD + continuous gain) ----------
+    // Mic MediaStream + AudioContext are acquired once per watch session and never
+    // stopped/recreated for ducking or TTS (only gain / SpeechSynthesis volume change).
+    // Web Speech STT may still start/stop recognition sessions; that is separate from
+    // the long-lived getUserMedia stream used by AnalyserNode VAD.
+    // Browser SpeechRecognition cannot true AEC against HTML <video>; echoCancellation
+    // on our persistent mic + program gain ramps reduce show-dialogue false triggers.
     let baseVolume = Math.min(1, Math.max(0.05, player.volume || 1));
     let duckReasons = new Set(); // "ambient" | "speech" | "ask" | "tts"
     let volumeFadeRaf = null;
@@ -485,14 +516,35 @@
     let userListenUntilMs = 0;
     let quietingProgram = false;
 
+    /**
+     * Persistent audio session — created at most once.
+     * { ctx, micStream, micSource, analyser, programGain, mediaElementSource, vadTimer, timeBuf }
+     */
+    let audioSession = null;
+    let audioSessionPromise = null;
+    let vadSpeechActive = false;
+    let lastVadSpeechMs = 0;
+    let noiseFloorRms = 0.012;
+    /** Current TTS gain (SpeechSynthesisUtterance.volume; no Web Audio path for synth). */
+    let ttsGainValue = 1;
+    let activeUtterance = null;
+    let lastAppliedProgramGain = 1;
+
     function duckEnabled() {
       return !duckWhileTalking || duckWhileTalking.checked;
+    }
+
+    function duckHelpers() {
+      return window.CowatcherDucking || null;
     }
 
     function programIsAudible() {
       if (!player) return false;
       if (player.paused || player.ended || player.muted) return false;
       if ((player.volume || 0) <= 0.04) return false;
+      if (audioSession && audioSession.programGain && lastAppliedProgramGain <= 0.04) {
+        return false;
+      }
       // readyState HAVE_CURRENT_DATA+
       return (player.readyState || 0) >= 2;
     }
@@ -507,25 +559,62 @@
 
     function captureBaseVolume() {
       if (duckReasons.size > 0 || ignoringVolumeChange) return;
+      // When Web Audio owns program level, player.volume is the user preference.
       const v = player.volume;
       if (typeof v === "number" && !Number.isNaN(v) && v >= 0) {
         baseVolume = Math.min(1, Math.max(0.05, v));
       }
     }
 
-    function duckedTargetVolume() {
-      // Strongest active duck wins (lowest volume target).
-      let fraction = 1;
-      if (duckReasons.has("ask") || duckReasons.has("tts") || duckReasons.has("speech")) {
-        fraction = Math.min(fraction, DUCK_FRACTION);
+    function computeTargetGains() {
+      const helpers = duckHelpers();
+      if (helpers && typeof helpers.targetGains === "function") {
+        return helpers.targetGains({
+          enabled: duckEnabled(),
+          reasons: duckReasons,
+          vadSpeechActive,
+          cfg: DUCK,
+        });
+      }
+      // Inline fallback if helper script failed to load.
+      if (!duckEnabled()) return { program: 1, tts: 1, rampSec: DUCK.RAMP_UP_S };
+      const hard =
+        duckReasons.has("ask")
+        || duckReasons.has("tts")
+        || duckReasons.has("speech")
+        || vadSpeechActive;
+      if (hard) {
+        return {
+          program: DUCK.DUCK_GAIN,
+          tts: DUCK.DUCK_GAIN,
+          rampSec: DUCK.RAMP_DOWN_S,
+        };
       }
       if (duckReasons.has("ambient")) {
-        fraction = Math.min(fraction, AMBIENT_DUCK_FRACTION);
+        return {
+          program: DUCK.AMBIENT_GAIN,
+          tts: 1,
+          rampSec: DUCK.RAMP_DOWN_S,
+        };
       }
-      if (fraction >= 1) return baseVolume;
-      return Math.max(DUCK_MIN, Math.min(baseVolume, baseVolume * fraction));
+      return { program: 1, tts: 1, rampSec: DUCK.RAMP_UP_S };
     }
 
+    function rampGainParam(gainParam, target, rampSec) {
+      if (!audioSession || !gainParam) return;
+      const now = audioSession.ctx.currentTime;
+      const end = Math.min(1, Math.max(0, target));
+      try {
+        gainParam.cancelScheduledValues(now);
+        gainParam.setValueAtTime(gainParam.value, now);
+        gainParam.linearRampToValueAtTime(end, now + Math.max(0.02, rampSec || 0.1));
+      } catch (_) {
+        gainParam.value = end;
+      }
+      lastAppliedProgramGain = end;
+    }
+
+    /** Fallback: fade HTMLMediaElement.volume when Web Audio graph is not ready. */
     function fadePlayerVolume(target, durationMs = VOLUME_FADE_MS) {
       if (volumeFadeRaf) {
         cancelAnimationFrame(volumeFadeRaf);
@@ -542,7 +631,6 @@
       const t0 = performance.now();
       function step(now) {
         const t = Math.min(1, (now - t0) / Math.max(durationMs, 1));
-        // ease-out
         const eased = 1 - (1 - t) * (1 - t);
         ignoringVolumeChange = true;
         player.volume = start + (end - start) * eased;
@@ -556,6 +644,35 @@
       volumeFadeRaf = requestAnimationFrame(step);
     }
 
+    function applyTtsGain(target) {
+      ttsGainValue = Math.min(1, Math.max(0, target));
+      if (activeUtterance) {
+        try {
+          activeUtterance.volume = ttsGainValue;
+        } catch (_) { /* browser may ignore mid-utterance volume */ }
+      }
+    }
+
+    /**
+     * Apply program + TTS duck targets. Prefer GainNode ramps; never restarts audio graph.
+     */
+    function applyUnifiedGains() {
+      const { program, tts, rampSec } = computeTargetGains();
+      if (audioSession && audioSession.programGain) {
+        // Keep element volume as user base; duck via GainNode only.
+        rampGainParam(audioSession.programGain.gain, program, rampSec);
+      } else {
+        // Pre-session fallback: same reason→fraction mapping on player.volume.
+        if (program >= 0.99) {
+          fadePlayerVolume(baseVolume);
+        } else {
+          const floor = DUCK.VOLUME_FALLBACK_MIN || 0.08;
+          fadePlayerVolume(Math.max(floor, Math.min(baseVolume, baseVolume * program)));
+        }
+      }
+      applyTtsGain(tts);
+    }
+
     function syncDuckVolume() {
       if (speechUnduckTimer) {
         clearTimeout(speechUnduckTimer);
@@ -563,14 +680,11 @@
       }
       if (!duckEnabled()) {
         duckReasons.clear();
-        fadePlayerVolume(baseVolume);
+        vadSpeechActive = false;
+        applyUnifiedGains();
         return;
       }
-      if (duckReasons.size > 0) {
-        fadePlayerVolume(duckedTargetVolume());
-      } else {
-        fadePlayerVolume(baseVolume);
-      }
+      applyUnifiedGains();
     }
 
     function setDuckReason(reason, active) {
@@ -583,16 +697,183 @@
       }
       duckReasons.delete(reason);
       // Mild delay unduck after speech so a brief pause mid-phrase doesn't pop volume up.
-      if (reason === "speech" && duckReasons.size === 0) {
+      if (reason === "speech" && duckReasons.size === 0 && !vadSpeechActive) {
         if (speechUnduckTimer) clearTimeout(speechUnduckTimer);
         speechUnduckTimer = setTimeout(() => {
           speechUnduckTimer = null;
-          if (duckReasons.size === 0) fadePlayerVolume(baseVolume);
-          else fadePlayerVolume(duckedTargetVolume());
-        }, SPEECH_UNDUCK_DELAY_MS);
+          applyUnifiedGains();
+        }, DUCK.SPEECH_HANGOVER_MS);
         return;
       }
       syncDuckVolume();
+    }
+
+    function processVadRms(rms) {
+      const helpers = duckHelpers();
+      if (!duckEnabled()) {
+        if (vadSpeechActive) {
+          vadSpeechActive = false;
+          applyUnifiedGains();
+        }
+        return;
+      }
+      if (helpers && typeof helpers.updateNoiseFloor === "function") {
+        noiseFloorRms = helpers.updateNoiseFloor(noiseFloorRms, rms, vadSpeechActive, DUCK);
+      } else if (!vadSpeechActive) {
+        const a = DUCK.VAD_NOISE_ALPHA;
+        noiseFloorRms = noiseFloorRms * (1 - a) + rms * a;
+      }
+      const thr = helpers && typeof helpers.vadThreshold === "function"
+        ? helpers.vadThreshold(noiseFloorRms, DUCK)
+        : Math.max(
+          DUCK.VAD_MIN_THRESHOLD,
+          Math.max(DUCK.VAD_RMS_THRESHOLD, noiseFloorRms + DUCK.VAD_THRESHOLD_MARGIN)
+        );
+      const now = Date.now();
+      if (rms >= thr) {
+        lastVadSpeechMs = now;
+        if (!vadSpeechActive) {
+          vadSpeechActive = true;
+          applyUnifiedGains();
+        }
+        return;
+      }
+      const elapsed = helpers && typeof helpers.hangoverElapsed === "function"
+        ? helpers.hangoverElapsed(vadSpeechActive, lastVadSpeechMs, now, DUCK)
+        : (vadSpeechActive && (now - lastVadSpeechMs) >= DUCK.SPEECH_HANGOVER_MS);
+      if (elapsed) {
+        vadSpeechActive = false;
+        applyUnifiedGains();
+      }
+    }
+
+    function startVadLoop() {
+      if (!audioSession || audioSession.vadTimer) return;
+      const analyser = audioSession.analyser;
+      const buf = audioSession.timeBuf;
+      const helpers = duckHelpers();
+      audioSession.vadTimer = setInterval(() => {
+        if (!audioSession || !analyser) return;
+        try {
+          analyser.getFloatTimeDomainData(buf);
+        } catch (_) {
+          return;
+        }
+        const rms = helpers && typeof helpers.computeRms === "function"
+          ? helpers.computeRms(buf)
+          : (() => {
+              let sum = 0;
+              for (let i = 0; i < buf.length; i += 1) sum += buf[i] * buf[i];
+              return Math.sqrt(sum / buf.length);
+            })();
+        processVadRms(rms);
+      }, DUCK.VAD_POLL_MS);
+    }
+
+    /**
+     * Once-per-session: AudioContext + getUserMedia (+ media element graph).
+     * Never recreates after success. Safe to call repeatedly.
+     * getUserMedia only when ducking is enabled (VAD needed); graph without mic is not used.
+     */
+    async function ensureAudioSession() {
+      if (!duckEnabled()) return audioSession;
+      if (audioSession) {
+        if (audioSession.ctx && audioSession.ctx.state === "suspended") {
+          try { await audioSession.ctx.resume(); } catch (_) {}
+        }
+        return audioSession;
+      }
+      if (audioSessionPromise) return audioSessionPromise;
+
+      audioSessionPromise = (async () => {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          return null;
+        }
+        let ctx;
+        try {
+          ctx = new AC();
+        } catch (_) {
+          return null;
+        }
+        let micStream;
+        try {
+          const constraints = (duckHelpers() && duckHelpers().MIC_CONSTRAINTS)
+            || {
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+              video: false,
+            };
+          micStream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (_) {
+          // Soft-fail: keep volume fallbacks; do not leave a half-open session.
+          try { await ctx.close(); } catch (_) {}
+          return null;
+        }
+
+        let mediaElementSource;
+        let programGain;
+        try {
+          mediaElementSource = ctx.createMediaElementSource(player);
+          programGain = ctx.createGain();
+          programGain.gain.value = 1;
+          mediaElementSource.connect(programGain);
+          programGain.connect(ctx.destination);
+        } catch (_) {
+          // createMediaElementSource can only be called once per element — treat as fatal graph fail.
+          try {
+            micStream.getTracks().forEach((t) => t.stop());
+          } catch (_) {}
+          try { await ctx.close(); } catch (_) {}
+          return null;
+        }
+
+        const micSource = ctx.createMediaStreamSource(micStream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.75;
+        // Analyse only — never connect mic to destination (would feedback).
+        micSource.connect(analyser);
+
+        // Restore user program level on the element; duck via programGain from now on.
+        ignoringVolumeChange = true;
+        player.volume = baseVolume;
+        ignoringVolumeChange = false;
+
+        audioSession = {
+          ctx,
+          micStream,
+          micSource,
+          analyser,
+          programGain,
+          mediaElementSource,
+          vadTimer: null,
+          timeBuf: new Float32Array(analyser.fftSize),
+        };
+        startVadLoop();
+        applyUnifiedGains();
+        return audioSession;
+      })();
+
+      try {
+        const session = await audioSessionPromise;
+        if (!session) {
+          // Allow retry only when establishment failed (getUserMedia denied, etc.).
+          audioSessionPromise = null;
+        }
+        return session;
+      } catch (_) {
+        audioSessionPromise = null;
+        return null;
+      }
+    }
+
+    /** Warm graph on user gesture (autoplay / mic policy). Idempotent. */
+    function warmAudioSessionFromGesture() {
+      void ensureAudioSession();
     }
 
     function shouldAmbientDuck() {
@@ -616,8 +897,9 @@
     }
 
     /**
-     * Mic often hears speaker → "You're talking" from the show.
-     * Quiet the program and drop this STT round; next round is treated as the viewer.
+     * Mic often hears speaker → treat as program bleed.
+     * Quiet program via gain/VAD path and drop this STT round; next round is the viewer.
+     * Does not stop the persistent MediaStream / AudioContext.
      */
     function suppressProgramBleedAndRelisten() {
       if (quietingProgram || askInFlight || ttsSpeaking) return;
@@ -628,7 +910,7 @@
       armUserListenWindow();
       updateListenBadge("on", "Quieting program…");
       setStatus("Program audio quieted — say your question now.", "ok");
-      // Tear down STT without submitting the show's dialogue.
+      // Tear down STT only (not the VAD mic stream).
       if (recognition) {
         const rec = recognition;
         rec.onresult = null;
@@ -651,10 +933,23 @@
     }
 
     player.addEventListener("volumechange", () => {
-      if (ignoringVolumeChange || duckReasons.size > 0) return;
+      if (ignoringVolumeChange) return;
+      // With Web Audio graph, player.volume is always the user base.
+      if (audioSession && duckReasons.size > 0) {
+        // While ducked via GainNode, still accept user scrubbing volume as new base.
+        const v = player.volume;
+        if (typeof v === "number" && !Number.isNaN(v) && v >= 0) {
+          baseVolume = Math.min(1, Math.max(0.05, v));
+        }
+        return;
+      }
+      if (duckReasons.size > 0) return;
       captureBaseVolume();
     });
-    player.addEventListener("play", () => syncAmbientDuck());
+    player.addEventListener("play", () => {
+      warmAudioSessionFromGesture();
+      syncAmbientDuck();
+    });
     player.addEventListener("playing", () => syncAmbientDuck());
     player.addEventListener("pause", () => syncAmbientDuck());
     player.addEventListener("ended", () => syncAmbientDuck());
@@ -666,13 +961,20 @@
       duckWhileTalking.addEventListener("change", () => {
         if (!duckWhileTalking.checked) {
           duckReasons.clear();
+          vadSpeechActive = false;
           userListenUntilMs = 0;
-          fadePlayerVolume(baseVolume);
+          applyUnifiedGains();
         } else {
+          warmAudioSessionFromGesture();
           syncAmbientDuck();
+          applyUnifiedGains();
         }
       });
     }
+
+    // Unlock AudioContext + optional mic for VAD on first intentional gesture.
+    document.addEventListener("pointerdown", warmAudioSessionFromGesture, { passive: true });
+    document.addEventListener("keydown", warmAudioSessionFromGesture, { passive: true });
 
     function setStatus(text, kind = "") {
       statusEl.textContent = text;
@@ -729,6 +1031,7 @@
       if (synth) {
         try { synth.cancel(); } catch (_) {}
       }
+      activeUtterance = null;
       ttsSpeaking = false;
       setDuckReason("tts", false);
     }
@@ -982,6 +1285,7 @@
     function setTtsSpeaking(active) {
       ttsSpeaking = active;
       if (active) {
+        // Pause STT only — keep VAD mic + AudioContext warm (no stream restart).
         disposeRecognition();
         setDuckReason("tts", true);
         setDuckReason("ask", false);
@@ -1010,7 +1314,12 @@
       setStatus("Answering…", "ok");
       const utterance = new SpeechSynthesisUtterance(spoken);
       applyUtteranceVoice(utterance);
+      // TTS path uses SpeechSynthesisUtterance.volume (no Web Audio node for synth).
+      // VAD may lower volume while user talks over the answer — does not cancel speech.
+      utterance.volume = Math.max(0, Math.min(1, ttsGainValue));
+      activeUtterance = utterance;
       const finish = () => {
+        if (activeUtterance === utterance) activeUtterance = null;
         setTtsSpeaking(false);
         if (!askInFlight) setStatus(readyMessage, "ok");
       };
@@ -1163,6 +1472,7 @@
     async function submitQuestion(question) {
       const titleId = titleSelect.value;
       if (!titleId || askInFlight) return;
+      void ensureAudioSession();
       if (isClientNoise(question)) {
         questionText.textContent = question || "—";
         answerText.textContent = "—";
@@ -1237,7 +1547,22 @@
       return `${minutes}:${String(secs).padStart(2, "0")}`;
     }
 
+    function autoListenEnabled() {
+      return Boolean(autoListenMic && autoListenMic.checked);
+    }
+
+    function persistAutoListenPref() {
+      try {
+        localStorage.setItem(LS_AUTO_LISTEN, autoListenEnabled() ? "1" : "0");
+      } catch (_) {}
+    }
+
     function enableAmbientMic() {
+      if (!autoListenEnabled()) {
+        disableAmbientMic();
+        updateListenBadge("off", "Mic off");
+        return;
+      }
       if (!speechSupported()) {
         listenDesired = false;
         updateListenBadge("off", "Mic unavailable");
@@ -1245,6 +1570,8 @@
         return;
       }
       listenDesired = true;
+      // Long-lived mic + VAD for conversation ducking (does not wait for STT).
+      void ensureAudioSession();
       syncAmbientDuck();
       ensureListening();
     }
@@ -1257,7 +1584,27 @@
       disposeRecognition();
       setDuckReason("ambient", false);
       setDuckReason("speech", false);
-      updateListenBadge("off", "Mic idle");
+      updateListenBadge("off", autoListenEnabled() ? "Mic idle" : "Mic off");
+    }
+
+    function applyAutoListenToggle() {
+      persistAutoListenPref();
+      if (!titleSelect.value) {
+        disableAmbientMic();
+        return;
+      }
+      if (autoListenEnabled()) {
+        enableAmbientMic();
+        setStatus(
+          speechSupported()
+            ? "Auto listen on — say “Hey…” + your question, or type below."
+            : "Mic unavailable — type questions below.",
+          "ok"
+        );
+      } else {
+        disableAmbientMic();
+        setStatus("Auto listen off — type questions to measure latency / quality.", "ok");
+      }
     }
 
     async function loadTitles() {
@@ -1308,13 +1655,21 @@
       player.load();
       sendBtn.disabled = false;
       questionInput.disabled = false;
-      enableAmbientMic();
-      setStatus(
-        speechSupported()
-          ? `Loaded ${titleId}. Play, then say “Hey…” + your question.`
-          : `Loaded ${titleId}. Type questions below.`,
-        "ok"
-      );
+      if (autoListenEnabled()) {
+        enableAmbientMic();
+        setStatus(
+          speechSupported()
+            ? `Loaded ${titleId}. Play, then say “Hey…” + your question.`
+            : `Loaded ${titleId}. Type questions below.`,
+          "ok"
+        );
+      } else {
+        disableAmbientMic();
+        setStatus(
+          `Loaded ${titleId}. Auto listen off — type a question (or enable Auto listen).`,
+          "ok"
+        );
+      }
     }
 
     sendBtn.addEventListener("click", () => submitTypedQuestion());
@@ -1322,6 +1677,9 @@
       if (event.key === "Enter") { event.preventDefault(); submitTypedQuestion(); }
     });
     titleSelect.addEventListener("change", onTitleChange);
+    if (autoListenMic) {
+      autoListenMic.addEventListener("change", applyAutoListenToggle);
+    }
 
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
@@ -1331,9 +1689,18 @@
           try { activeStreamAbort.abort(); } catch (_) {}
           activeStreamAbort = null;
         }
+        // Keep AudioContext + mic MediaStream alive across tab hide (no restart on return).
+        if (audioSession && audioSession.ctx && audioSession.ctx.state === "running") {
+          try { audioSession.ctx.suspend(); } catch (_) {}
+        }
         updateListenBadge("off", "Tab hidden");
-      } else if (shouldBeListening()) {
-        scheduleListenRestart(LISTEN_COOLDOWN_MS);
+      } else {
+        if (audioSession && audioSession.ctx && audioSession.ctx.state === "suspended") {
+          try { void audioSession.ctx.resume(); } catch (_) {}
+        }
+        if (shouldBeListening()) {
+          scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        }
       }
     });
 
@@ -1342,6 +1709,13 @@
       cancelSynth();
       if (activeStreamAbort) {
         try { activeStreamAbort.abort(); } catch (_) {}
+      }
+      // Session end only — stop VAD loop; browser releases stream on navigation.
+      if (audioSession) {
+        if (audioSession.vadTimer) {
+          clearInterval(audioSession.vadTimer);
+          audioSession.vadTimer = null;
+        }
       }
     });
 

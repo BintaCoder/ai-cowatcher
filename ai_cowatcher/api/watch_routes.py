@@ -23,6 +23,7 @@ router = APIRouter(tags=["watch"])
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 _WATCH_HTML = _WEB_DIR / "watch.html"
+_CONVERSATION_DUCKING_JS = _WEB_DIR / "conversation_ducking.js"
 
 _session_factory: sessionmaker | None = None
 
@@ -57,6 +58,18 @@ async def watch_page() -> HTMLResponse:
     if not _WATCH_HTML.is_file():
         raise HTTPException(status_code=500, detail="Watch page asset missing")
     return HTMLResponse(_WATCH_HTML.read_text(encoding="utf-8"))
+
+
+@router.get("/watch/conversation_ducking.js", include_in_schema=False)
+async def watch_conversation_ducking_js() -> FileResponse:
+    """Pure ducking helpers shared by /watch (VAD thresholds, gain targets)."""
+    if not _CONVERSATION_DUCKING_JS.is_file():
+        raise HTTPException(status_code=500, detail="Ducking helper asset missing")
+    return FileResponse(
+        _CONVERSATION_DUCKING_JS,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.get("/favicon.ico", include_in_schema=False)

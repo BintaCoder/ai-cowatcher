@@ -24,7 +24,8 @@ AI Co-watcher is a **spoiler-safe TV companion**. The pilot prioritizes a **demo
    `POST /navigate` for clock seeks, titled events, semantic seeks.
 
 4. **Watch UI**  
-   `GET /watch` — play video (Range stream), title dropdown (completed + on-disk paths only), duck program volume while talking, ambient mic with **Hey** wake word, SSE answers.
+   `GET /watch` — play video (Range stream), title dropdown (completed + on-disk paths only),
+   VAD-driven conversation gain duck (program + TTS), optional ambient mic with **Hey** wake word, SSE answers.
 
 ### Design priorities (pilot)
 
@@ -46,8 +47,8 @@ flowchart TB
         WATCH["GET /watch"]
         VIDEO["HTML5 video\nH.264+AAC recommended"]
         STT["Web Speech API\nHey wake word"]
-        DUCK["Volume duck /\nprogram-bleed ignore"]
-        TTS["SpeechSynthesis"]
+        DUCK["VAD + gain duck\n(program + TTS)"]
+        TTS["SpeechSynthesis\n(volume duck)"]
     end
 
     subgraph API["FastAPI + Uvicorn"]
@@ -286,11 +287,14 @@ Skips cache for filler/navigate/empty/“not sure”. Use for scripted demo line
 | Feature | Behavior |
 |---------|----------|
 | Titles | `GET /titles` — **completed**, non-ephemeral (`nav-*` / `demo-web*` filtered), **video file still on disk** |
-| Voice | Mic open while title selected; only phrases with **Hey** (or Hay) become questions |
-| Program bleed | Duck volume while listening/talking; program without wake word is ignored |
-| Duck checkbox | Conversation-awareness volume while speech / ask / TTS |
+| Voice | Optional continuous STT (`Auto listen`, **off by default**); only phrases with **Hey** (or Hay) become questions |
+| Persistent audio | Once per session: `getUserMedia` (echoCancellation) + one `AudioContext`; never torn down for ducking/TTS |
+| Conversation duck | AnalyserNode VAD on the long-lived mic drives smooth **GainNode** ramps on program audio (~15%) + `SpeechSynthesisUtterance.volume` for answers; hangover ~500ms |
+| Program bleed | Mild ambient duck while listening; wake-word gate ignores show dialogue without **Hey** |
+| Duck checkbox | Enables conversation-awareness duck; disable for unducked program audio |
 | Stream | SSE: `status`, `tool_*`, `intent`, `token`, `done` / `error` |
 | Video codec | Prefer H.264+AAC for audio playback |
+| Helpers | `GET /watch/conversation_ducking.js` — pure VAD/gain target helpers |
 
 ---
 
