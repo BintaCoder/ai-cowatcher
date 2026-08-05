@@ -10,6 +10,20 @@ from pathlib import Path
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 
+def resolve_video_file_path(video_path: str | None) -> Path | None:
+    """Return an absolute Path when the title video exists on disk."""
+    if not video_path or not str(video_path).strip():
+        return None
+    path = Path(video_path).expanduser()
+    if path.is_file():
+        return path.resolve()
+    if not path.is_absolute():
+        cwd_path = Path.cwd() / path
+        if cwd_path.is_file():
+            return cwd_path.resolve()
+    return None
+
+
 def guess_video_media_type(path: Path) -> str:
     media_type, _ = mimetypes.guess_type(str(path))
     return media_type or "video/mp4"

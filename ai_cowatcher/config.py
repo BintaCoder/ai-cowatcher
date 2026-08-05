@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 WhisperModelSize = Literal["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 WhisperComputeType = Literal["int8", "int8_float16", "float16", "float32"]
 EscalationStrategy = Literal["heuristic", "prompt"]
+UtteranceGateStrategy = Literal["heuristic", "prompt", "merged"]
 
 
 class Settings(BaseSettings):
@@ -59,6 +60,24 @@ class Settings(BaseSettings):
         default="title_knowledge", alias="QDRANT_KNOWLEDGE_COLLECTION"
     )
 
+    # ── Q&A response cache (exact Redis + semantic Qdrant) ─────────────────────
+    # Default off for latency isolation; demos: make api QA_CACHE_ENABLED=true
+    qa_cache_enabled: bool = Field(default=False, alias="QA_CACHE_ENABLED")
+    qa_cache_collection: str = Field(default="qa_cache", alias="QA_CACHE_COLLECTION")
+    # Playhead bucket width. 45s better matches multi-scene sitcom beats (>30s)
+    # without serving cross-context answers; override per title if needed.
+    qa_cache_ts_bucket_sec: int = Field(default=45, alias="QA_CACHE_TS_BUCKET_SEC")
+    qa_cache_exact_ttl_sec: int = Field(default=7200, alias="QA_CACHE_EXACT_TTL_SEC")
+    qa_cache_semantic_ttl_sec: int = Field(
+        default=7200, alias="QA_CACHE_SEMANTIC_TTL_SEC"
+    )
+    # Cosine floor for semantic near-dup hits. Tuned from 0.90 → 0.88 on labeled
+    # near-dup vs different pairs (see scripts/tune_qa_cache_threshold.py).
+    qa_cache_semantic_threshold: float = Field(
+        default=0.88, alias="QA_CACHE_SEMANTIC_THRESHOLD"
+    )
+    qa_cache_semantic_top_k: int = Field(default=3, alias="QA_CACHE_SEMANTIC_TOP_K")
+
     # ── Neo4j (character intelligence graph) ──────────────────────────────────
     neo4j_uri: str = Field(default="", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
@@ -66,11 +85,59 @@ class Settings(BaseSettings):
     neo4j_database: str = Field(default="neo4j", alias="NEO4J_DATABASE")
 
     # ── MinIO ─────────────────────────────────────────────────────────────────
-    minio_endpoint: str = Field(default="localhost:9000", alias="MINIO_ENDPOINT")
+    minio_endpoint: str = Field(default="localhost:19000", alias="MINIO_ENDPOINT")
     minio_access_key: str = Field(default="minioadmin", alias="MINIO_ACCESS_KEY")
     minio_secret_key: str = Field(default="minioadmin", alias="MINIO_SECRET_KEY")
     minio_bucket: str = Field(default="cowatcher", alias="MINIO_BUCKET")
     minio_secure: bool = Field(default=False, alias="MINIO_SECURE")
+    # local | minio — local uses OBJECT_STORE_LOCAL_DIR (default under project)
+    object_store_backend: Literal["local", "minio"] = Field(
+        default="local",
+        alias="OBJECT_STORE_BACKEND",
+    )
+    object_store_local_dir: str = Field(
+        default=".cowatcher-objects",
+        alias="OBJECT_STORE_LOCAL_DIR",
+    )
+    # Max seconds of scene audio stored / sent to multimodal LLM
+    scene_audio_max_sec: float = Field(default=20.0, alias="SCENE_AUDIO_MAX_SEC")
+    scene_audio_enabled: bool = Field(default=True, alias="SCENE_AUDIO_ENABLED")
+    # Attach retrieved clips to the conversation answer model
+    multimodal_scene_audio_enabled: bool = Field(
+        default=False,  # off for pilot latency — text scenes usually enough
+        alias="MULTIMODAL_SCENE_AUDIO_ENABLED",
+    )
+    multimodal_max_clips: int = Field(default=2, alias="MULTIMODAL_MAX_CLIPS")
+    # Pilot: minimize tool hops / model reasoning / multimodal.
+    # Production startup fails if this is false (legacy multi-tool path reachable).
+    pilot_low_latency: bool = Field(default=True, alias="PILOT_LOW_LATENCY")
+    # Cap scenes + transcript size sent into the merged Gemini prompt (cost + TTFT).
+    # 2 scenes × 200 chars/field keeps spoiler-safe grounding while cutting prompt size.
+    evidence_max_scenes: int = Field(default=2, alias="EVIDENCE_MAX_SCENES")
+    evidence_max_chars_per_field: int = Field(
+        default=200, alias="EVIDENCE_MAX_CHARS_PER_FIELD"
+    )
+    # Short-lived reuse of BGE query vectors for similar/repeated questions.
+    query_embedding_cache_ttl_sec: float = Field(
+        default=90.0, alias="QUERY_EMBEDDING_CACHE_TTL_SEC"
+    )
+    query_embedding_cache_max: int = Field(
+        default=256, alias="QUERY_EMBEDDING_CACHE_MAX"
+    )
+    # Cap completion tokens for brief who/what lines (TTFT-friendly under Gemini 3).
+    # Pilot answers are ~1 short sentence; keep headroom for reasoning tokens first.
+    llm_short_answer_max_tokens: int = Field(
+        default=160, alias="LLM_SHORT_ANSWER_MAX_TOKENS"
+    )
+
+    # ── Prediction Mode (spoiler-safe guesses) ───────────────────────────────
+    prediction_mode_enabled: bool = Field(default=True, alias="PREDICTION_MODE_ENABLED")
+
+    # ── Proactive trivia (opt-in client; ingest precompute) ──────────────────
+    trivia_ingest_enabled: bool = Field(default=True, alias="TRIVIA_INGEST_ENABLED")
+    trivia_min_gap_sec: float = Field(default=720.0, alias="TRIVIA_MIN_GAP_SEC")
+    trivia_max_per_session: int = Field(default=4, alias="TRIVIA_MAX_PER_SESSION")
+    trivia_ask_cooldown_sec: float = Field(default=45.0, alias="TRIVIA_ASK_COOLDOWN_SEC")
 
     # ── FFmpeg (subprocess) ───────────────────────────────────────────────────
     ffmpeg_bin: str = Field(default="ffmpeg", alias="FFMPEG_BIN")
@@ -86,6 +153,9 @@ class Settings(BaseSettings):
     insightface_ctx_id: int = Field(default=-1, alias="INSIGHTFACE_CTX_ID")
 
     # ── Speaker diarization (pyannote.audio) ──────────────────────────────────
+    # Optional: install with `pip install '.[diarization]'` and set HUGGINGFACE_TOKEN.
+    # If the package is missing, ingest continues with empty speaker clusters.
+    diarization_enabled: bool = Field(default=True, alias="DIARIZATION_ENABLED")
     diarization_model: str = Field(
         default="pyannote/speaker-diarization-3.1", alias="DIARIZATION_MODEL"
     )
@@ -100,22 +170,27 @@ class Settings(BaseSettings):
     embedding_device: str = Field(default="cpu", alias="EMBEDDING_DEVICE")
 
     # ── Vision captioning (LiteLLM) ───────────────────────────────────────────
-    vision_model: str = Field(default="gemini/gemini-2.0-flash-lite", alias="VISION_MODEL")
+    vision_model: str = Field(default="gemini/gemini-3.5-flash-lite", alias="VISION_MODEL")
     vision_max_tokens: int = Field(default=256, alias="VISION_MAX_TOKENS")
     vision_caption_delay_sec: float = Field(default=1.0, alias="VISION_CAPTION_DELAY_SEC")
     vision_caption_max_retries: int = Field(default=8, alias="VISION_CAPTION_MAX_RETRIES")
     vision_frame_max_size: int = Field(default=512, alias="VISION_FRAME_MAX_SIZE")
 
     # ── Conversation LLM (LiteLLM) ────────────────────────────────────────────
-    llm_primary_model: str = Field(default="openai/gpt-4o-mini", alias="LLM_PRIMARY_MODEL")
+    llm_primary_model: str = Field(default="gemini/gemini-3.6-flash", alias="LLM_PRIMARY_MODEL")
     llm_fallback_model: str = Field(
-        default="anthropic/claude-3-5-haiku-latest",
+        default="gemini/gemini-3.6-flash",
         alias="LLM_FALLBACK_MODEL",
     )
     llm_mock_model: str = Field(default="mock-llm", alias="LLM_MOCK_MODEL")
-    llm_tier_fast_model: str = Field(default="openai/gpt-4o-mini", alias="LLM_TIER_FAST_MODEL")
+    # Prefer online multimodal-capable models for co-watch answers (audio+text).
+    # Override to ollama/* only if you accept text-only fall back when clips need mm.
+    llm_tier_fast_model: str = Field(
+        default="gemini/gemini-3.6-flash",
+        alias="LLM_TIER_FAST_MODEL",
+    )
     llm_tier_escalated_model: str = Field(
-        default="openai/gpt-4o",
+        default="gemini/gemini-3.6-flash",
         alias="LLM_TIER_ESCALATED_MODEL",
     )
     llm_mock_tier_fast_model: str = Field(
@@ -135,8 +210,40 @@ class Settings(BaseSettings):
         default="why,how,explain,compare,motivation,relationship,theme,symbolism,foreshadow",
         alias="LLM_ESCALATION_KEYWORDS",
     )
-    llm_max_tokens: int = Field(default=1024, alias="LLM_MAX_TOKENS")
-    llm_temperature: float = Field(default=0.2, alias="LLM_TEMPERATURE")
+    # Global answer budget. Keep ≥512 so Gemini 3 reasoning doesn't starve speech.
+    # Short who/what lines use LLM_SHORT_ANSWER_MAX_TOKENS via _answer_max_tokens.
+    llm_max_tokens: int = Field(default=512, alias="LLM_MAX_TOKENS")
+    # Tool-call JSON + multi-step needs more headroom than spoken answer size.
+    llm_tool_max_tokens: int = Field(default=768, alias="LLM_TOOL_MAX_TOKENS")
+    llm_temperature: float = Field(default=0.35, alias="LLM_TEMPERATURE")
+    # LiteLLM/Gemini 3: lower thinking so max_tokens isn't all reasoning.
+    # Applied globally in LiteLLMCompletionClient — not overridden per persona.
+    llm_reasoning_effort: str = Field(default="minimal", alias="LLM_REASONING_EFFORT")
+    # Pilot cost instrumentation (USD per 1M tokens; not billing). Flash-lite class.
+    llm_input_usd_per_mtok: float = Field(
+        default=0.10, alias="LLM_INPUT_USD_PER_MTOK"
+    )
+    llm_output_usd_per_mtok: float = Field(
+        default=0.40, alias="LLM_OUTPUT_USD_PER_MTOK"
+    )
+    # Soft alert when a viewer's cumulative estimated spend exceeds this (USD).
+    session_cost_budget_usd: float = Field(
+        default=0.50, alias="SESSION_COST_BUDGET_USD"
+    )
+    ollama_api_base: str = Field(
+        default="http://localhost:11434",
+        alias="OLLAMA_API_BASE",
+    )
+    # ── Utterance gate (mic / typed noise + intents) ──────────────────────────
+    utterance_gate_enabled: bool = Field(default=True, alias="UTTERANCE_GATE_ENABLED")
+    # heuristic = rules only
+    # prompt = rules + ambiguous YES/NO via a second fast-LLM call
+    # merged = free heuristics for clear cases; ambiguous + content go through one
+    #          tagged completion (intent + answer in the same stream/call)
+    utterance_gate_strategy: UtteranceGateStrategy = Field(
+        default="merged",
+        alias="UTTERANCE_GATE_STRATEGY",
+    )
 
     # ── Real-time retrieval ─────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=5, alias="RETRIEVAL_TOP_K")
@@ -169,6 +276,12 @@ class Settings(BaseSettings):
     user_memory_cache_turns: int = Field(default=20, alias="USER_MEMORY_CACHE_TURNS")
     user_memory_redis_ttl_sec: int = Field(default=3600, alias="USER_MEMORY_REDIS_TTL_SEC")
 
+    # ── Companion persona (tone pack under ai_cowatcher/personas/) ─────────────
+    default_persona_id: str = Field(
+        default="easygoing_friend",
+        alias="DEFAULT_PERSONA_ID",
+    )
+
     # ── Cast / actor lookup (TMDB) ────────────────────────────────────────────
     # Public cast metadata is not a plot spoiler, so this is safe to expose.
     tmdb_api_key: str = Field(default="", alias="TMDB_API_KEY")
@@ -179,6 +292,10 @@ class Settings(BaseSettings):
     # networks; retry transient connection failures before giving up.
     tmdb_max_retries: int = Field(default=5, alias="TMDB_MAX_RETRIES")
     tmdb_retry_backoff_sec: float = Field(default=0.5, alias="TMDB_RETRY_BACKOFF_SEC")
+    # Hot cache TTL for cast after ingest/write-through (Redis).
+    cast_cache_redis_ttl_sec: int = Field(
+        default=7 * 24 * 3600, alias="CAST_CACHE_REDIS_TTL_SEC"
+    )
     # JSON map of internal title_id -> human title used for TMDB search,
     # e.g. {"demo": "Kids", "thriller-001": "Knives Out (2019)"}
     title_names: str = Field(default="{}", alias="TITLE_NAMES")
@@ -244,8 +361,8 @@ class Settings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def cast_lookup_enabled(self) -> bool:
-        """Cast lookup is available only with a TMDB key and outside mock mode."""
-        return bool(self.tmdb_api_key) and not self.mock_mode
+        """Cast tool is always attached: prefer ingest cache; fall back to TMDB when keyed."""
+        return True
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -334,9 +451,42 @@ class Settings(BaseSettings):
                 "(large models are cost-blocked until engagement is proven)."
             )
 
+    def legacy_multi_tool_path_reachable(self) -> bool:
+        """True when the multi-round tool LLM loop can run (not merged-only)."""
+        if self.pilot_low_latency:
+            return False
+        # Gate merged still avoids multi-tool for content; other strategies do not.
+        return self.utterance_gate_strategy != "merged"
+
+    def validate_pilot_latency_config(self) -> None:
+        """Prod must stay on 1-retrieve + 1-LLM merged path; dev logs when legacy is on."""
+        env = (self.app_env or "").strip().lower()
+        is_prod = env in ("production", "prod")
+        if is_prod:
+            if not self.pilot_low_latency:
+                raise ValueError(
+                    "PILOT_LOW_LATENCY must be true in production "
+                    "(legacy multi-tool agent path is not allowed)."
+                )
+            if self.utterance_gate_strategy != "merged":
+                raise ValueError(
+                    "UTTERANCE_GATE_STRATEGY must be 'merged' in production "
+                    "(legacy multi-tool / gate-LLM paths are not allowed)."
+                )
+            return
+        if not self.pilot_low_latency or self.utterance_gate_strategy != "merged":
+            logger.warning(
+                "legacy multi-tool path is reachable "
+                "(PILOT_LOW_LATENCY=%s UTTERANCE_GATE_STRATEGY=%s APP_ENV=%s)",
+                self.pilot_low_latency,
+                self.utterance_gate_strategy,
+                self.app_env,
+            )
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
     settings.validate_pilot_whisper_config()
+    settings.validate_pilot_latency_config()
     return settings

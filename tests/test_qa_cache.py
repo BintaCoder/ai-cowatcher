@@ -1,0 +1,213 @@
+"""Tests for two-tier Q&A cache (exact + semantic)."""
+
+from __future__ import annotations
+
+import uuid
+from unittest.mock import MagicMock
+
+import pytest
+from qdrant_client import QdrantClient
+
+from ai_cowatcher.config import Settings
+from ai_cowatcher.providers.mock import MockTextEmbedder
+from ai_cowatcher.realtime.viewing_session import ViewingSession
+from ai_cowatcher.storage.qa_cache import (
+    InMemoryExactKV,
+    QACache,
+    build_qa_cache,
+    should_cache_answer,
+)
+
+
+@pytest.fixture
+def cache_settings() -> Settings:
+    return Settings(
+        MOCK_MODE=True,
+        QA_CACHE_ENABLED=True,
+        QA_CACHE_COLLECTION=f"qa_test_{uuid.uuid4().hex[:10]}",
+        QA_CACHE_SEMANTIC_THRESHOLD=0.5,
+    )
+
+
+@pytest.fixture
+def qa_cache(cache_settings: Settings) -> QACache:
+    embedder = MockTextEmbedder()
+    client = QdrantClient(":memory:")
+    return QACache(
+        exact_kv=InMemoryExactKV(),
+        qdrant=client,
+        embedder=embedder,
+        settings=cache_settings,
+    )
+
+
+def test_exact_hit_after_store(qa_cache: QACache):
+    qa_cache.store(
+        "t1",
+        42.0,
+        "What just happened?",
+        "They're arguing in the foyer.",
+    )
+    # Same floor-division bucket for 45s default (42//45 == 44//45 == 0)
+    hit = qa_cache.lookup("t1", 44.0, "what just happened")
+    assert hit is not None
+    assert hit.source == "exact"
+    assert "foyer" in hit.answer
+
+
+def test_persona_isolation_same_question(qa_cache: QACache):
+    """Same Q + ts, different persona_id must not cross-hit (exact or semantic)."""
+    qa_cache.store(
+        "t1",
+        42.0,
+        "What just happened?",
+        "Witty take on the foyer fight.",
+        persona_id="witty_friend",
+    )
+    qa_cache.store(
+        "t1",
+        42.0,
+        "What just happened?",
+        "Easygoing read of the foyer scene.",
+        persona_id="easygoing_friend",
+    )
+    witty = qa_cache.lookup(
+        "t1", 44.0, "what just happened", persona_id="witty_friend"
+    )
+    easy = qa_cache.lookup(
+        "t1", 44.0, "what just happened", persona_id="easygoing_friend"
+    )
+    other = qa_cache.lookup(
+        "t1", 44.0, "what just happened", persona_id="calm_scout"
+    )
+    assert witty is not None and witty.source == "exact"
+    assert "Witty" in witty.answer
+    assert easy is not None and easy.source == "exact"
+    assert "Easygoing" in easy.answer
+    assert other is None
+
+    # Semantic path also filters by persona_id (use same question string as store
+    # so MockTextEmbedder vectors align — exact tier used normalize already).
+    qa_cache._exact = InMemoryExactKV()
+    witty_sem = qa_cache.lookup(
+        "t1", 44.0, "What just happened?", persona_id="witty_friend"
+    )
+    calm_sem = qa_cache.lookup(
+        "t1", 44.0, "What just happened?", persona_id="calm_scout"
+    )
+    assert witty_sem is not None and witty_sem.source == "semantic"
+    assert "Witty" in witty_sem.answer
+    assert calm_sem is None
+
+
+def test_bucket_mismatch_is_miss(qa_cache: QACache):
+    qa_cache.store("t1", 10.0, "Who is that?", "The detective.")
+    # Far later playhead → different bucket
+    hit = qa_cache.lookup("t1", 400.0, "Who is that?")
+    assert hit is None
+
+
+def test_semantic_hit_when_exact_cleared(qa_cache: QACache, cache_settings: Settings):
+    question = "What just happened on screen?"
+    answer = "A detective waves from the foyer."
+    qa_cache.store("t1", 12.0, question, answer)
+
+    # Wipe exact tier only; vector remains in Qdrant
+    qa_cache._exact = InMemoryExactKV()
+    hit = qa_cache.lookup("t1", 15.0, question)
+    assert hit is not None
+    assert hit.source == "semantic"
+    assert hit.answer == answer
+
+
+def test_should_cache_filters():
+    assert should_cache_answer(
+        answer="Hello there.",
+        speak=True,
+        skip_memory=False,
+        escalation_reason="merged:CONTENT",
+    )
+    assert not should_cache_answer(
+        answer="",
+        speak=False,
+        skip_memory=True,
+        escalation_reason="merged:FILLER",
+    )
+    assert not should_cache_answer(
+        answer="x",
+        speak=True,
+        skip_memory=False,
+        escalation_reason="merged:NAVIGATE",
+        navigate=True,
+    )
+    assert not should_cache_answer(
+        answer="Not sure yet — nothing's made that clear so far.",
+        speak=True,
+        skip_memory=False,
+        escalation_reason="merged:CONTENT",
+    )
+
+
+def test_exact_hit_skips_embedder(cache_settings: Settings):
+    embedder = MagicMock(wraps=MockTextEmbedder())
+    cache = QACache(
+        exact_kv=InMemoryExactKV(),
+        qdrant=QdrantClient(":memory:"),
+        embedder=embedder,
+        settings=cache_settings,
+    )
+    cache.store("t1", 10.0, "Who is that?", "Ross.")
+    embedder.embed_texts.reset_mock()
+    hit = cache.lookup("t1", 12.0, "who is that")
+    assert hit is not None
+    assert hit.source == "exact"
+    embedder.embed_texts.assert_not_called()
+
+
+def test_session_cache_round_trip(cache_settings: Settings):
+    agent = MagicMock()
+    agent.answer.return_value = MagicMock(
+        text="They're fighting over the remote.",
+        model_tier="fast",
+        model_name="mock",
+        escalation_reason="merged:CONTENT",
+        used_context=True,
+        prompt_tokens=1,
+        completion_tokens=1,
+        total_tokens=2,
+        skip_memory=False,
+        speak=True,
+    )
+    embedder = MockTextEmbedder()
+    cache = build_qa_cache(
+        cache_settings,
+        embedder=embedder,
+        qdrant_client=QdrantClient(":memory:"),
+        exact_kv=InMemoryExactKV(),
+    )
+    session = ViewingSession(
+        agent,  # type: ignore[arg-type]
+        cache_settings,
+        qa_cache=cache,
+    )
+    first = session.ask(
+        title_id="demo",
+        current_ts=20.0,
+        question="What's going on?",
+        user_id="u1",
+        persist_memory=False,
+    )
+    assert first.model_tier == "fast"
+    assert agent.answer.call_count == 1
+
+    second = session.ask(
+        title_id="demo",
+        current_ts=22.0,
+        question="Whats going on?",
+        user_id="u1",
+        persist_memory=False,
+    )
+    assert second.model_tier == "cache"
+    assert "cache:exact" in second.escalation_reason
+    assert agent.answer.call_count == 1  # no second LLM call
+    assert "remote" in second.answer

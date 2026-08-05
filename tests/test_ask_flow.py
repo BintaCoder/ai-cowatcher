@@ -101,7 +101,7 @@ def test_ask_before_reveal_says_unknown(viewing_session):
         user_id="viewer-42",
     )
 
-    assert "don't know yet" in result.answer.lower()
+    assert "not sure yet" in result.answer.lower() or "don't know yet" in result.answer.lower()
     assert "marcus" not in result.answer.lower()
 
 
@@ -114,7 +114,7 @@ def test_ask_after_reveal_returns_grounded_answer(viewing_session):
     )
 
     assert "marcus" in result.answer.lower()
-    assert "don't know yet" not in result.answer.lower()
+    assert "not sure yet" not in result.answer.lower()
 
 
 def test_post_ask_endpoint(viewing_session, test_settings: Settings):
@@ -132,7 +132,8 @@ def test_post_ask_endpoint(viewing_session, test_settings: Settings):
         },
     )
     assert early.status_code == 200
-    assert "don't know yet" in early.json()["answer"].lower()
+    answer = early.json()["answer"].lower()
+    assert "not sure yet" in answer or "don't know yet" in answer
 
     late = client.post(
         "/ask",

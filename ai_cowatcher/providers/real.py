@@ -49,6 +49,7 @@ class PySceneDetectDetector:
 class FFmpegAudioExtractor:
     def __init__(self, settings: Settings):
         self._ffmpeg = settings.ffmpeg_bin
+        self._max_window_sec = max(1.0, float(settings.scene_audio_max_sec))
 
     def extract_audio(self, video_path: str, output_path: str) -> str:
         cmd = [
@@ -56,6 +57,39 @@ class FFmpegAudioExtractor:
             "-y",
             "-i",
             video_path,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            output_path,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return output_path
+
+    def extract_audio_window(
+        self,
+        source_path: str,
+        output_path: str,
+        *,
+        start_ts: float,
+        end_ts: float,
+    ) -> str:
+        start = max(0.0, float(start_ts))
+        duration = max(0.05, float(end_ts) - start)
+        if duration > self._max_window_sec:
+            duration = self._max_window_sec
+        cmd = [
+            self._ffmpeg,
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            source_path,
             "-vn",
             "-acodec",
             "pcm_s16le",
@@ -119,10 +153,19 @@ class PyannoteDiarizer:
 
     Loaded lazily because it pulls in torch. Requires a Hugging Face access
     token with access to the gated diarization model.
+    Install with: ``pip install 'ai-cowatcher[diarization]'`` (or ``.[diarization]``).
     """
 
     def __init__(self, settings: Settings):
-        from pyannote.audio import Pipeline
+        try:
+            from pyannote.audio import Pipeline
+        except ImportError as exc:
+            raise ImportError(
+                "pyannote.audio is not installed. Ingest can run without it "
+                "(speaker clusters empty). To enable diarization: "
+                "pip install '.[diarization]' and set HUGGINGFACE_TOKEN for the "
+                "gated model."
+            ) from exc
 
         token = settings.huggingface_token or None
         logger.info("Loading pyannote diarization pipeline=%s", settings.diarization_model)
@@ -144,6 +187,14 @@ class PyannoteDiarizer:
             )
         segments.sort(key=lambda seg: (seg.start_ts, seg.end_ts))
         return segments
+
+
+class NoOpSpeakerDiarizer:
+    """Skip speaker diarization (no pyannote / disabled in config)."""
+
+    def diarize(self, audio_path: str) -> list[SpeakerSegment]:
+        del audio_path
+        return []
 
 
 class InsightFaceAnalyzer:

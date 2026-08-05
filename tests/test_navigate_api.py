@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,7 @@ from ai_cowatcher.domain import SceneEventRecord
 from ai_cowatcher.ingestion.event_detection import build_title_events
 from ai_cowatcher.main import create_app
 from ai_cowatcher.providers.mock import MockTextEmbedder
+from ai_cowatcher.realtime.navigation_session import NavigationSession
 from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 
 
@@ -81,21 +83,51 @@ def navigate_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     vectors = embedder.embed_texts([scene.embedding_text for scene in scenes])
     qdrant.upsert_scene_events(scenes, vectors)
 
+    nav_session = NavigationSession(
+        settings=settings,
+        session_factory=session_factory,
+        embedder=embedder,
+        qdrant_store=qdrant,
+    )
+    build_calls: list[int] = []
+
+    def _warm_navigation(*_args, **_kwargs):
+        build_calls.append(1)
+        return nav_session
+
     monkeypatch.setattr(
-        "ai_cowatcher.realtime.navigation_session._build_embedder",
+        "ai_cowatcher.main.build_navigation_session",
+        _warm_navigation,
+    )
+    monkeypatch.setattr(
+        "ai_cowatcher.main.build_viewing_session",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+    # Shared lifespan setup still opens a SQLAlchemy engine via create_db_engine;
+    # session data lives on the same Postgres/settings as above when using real PG.
+    monkeypatch.setattr(
+        "ai_cowatcher.main.create_db_engine",
+        lambda settings=None, **_kwargs: engine,
+    )
+    monkeypatch.setattr(
+        "ai_cowatcher.main.init_database",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "ai_cowatcher.main._build_embedder",
         lambda _settings: embedder,
     )
     monkeypatch.setattr(
-        "ai_cowatcher.realtime.navigation_session.QdrantSceneStore",
-        lambda _settings: qdrant,
+        "ai_cowatcher.main.QdrantSceneStore",
+        lambda *_args, **_kwargs: qdrant,
     )
 
-    app = create_app(settings)
-    return TestClient(app), title_id
+    with TestClient(create_app(settings)) as client:
+        yield client, title_id, build_calls
 
 
 def test_navigate_absolute_time(navigate_client):
-    client, title_id = navigate_client
+    client, title_id, _ = navigate_client
     response = client.post(
         "/navigate",
         json={
@@ -112,7 +144,7 @@ def test_navigate_absolute_time(navigate_client):
 
 
 def test_navigate_second_fight(navigate_client):
-    client, title_id = navigate_client
+    client, title_id, _ = navigate_client
     response = client.post(
         "/navigate",
         json={
@@ -126,3 +158,24 @@ def test_navigate_second_fight(navigate_client):
     body = response.json()
     assert body["seek_to_ts"] == 80.0
     assert body["event_type"] == "fight"
+
+
+def test_navigate_reuses_warm_session(navigate_client):
+    client, title_id, build_calls = navigate_client
+    assert build_calls == [1]
+    assert client.app.state.navigation_session is not None
+
+    for _ in range(3):
+        response = client.post(
+            "/navigate",
+            json={
+                "title_id": title_id,
+                "current_ts": 0,
+                "question": "go to 0:30",
+                "user_id": "u1",
+            },
+        )
+        assert response.status_code == 200
+
+    # Built once at lifespan — never per request.
+    assert build_calls == [1]

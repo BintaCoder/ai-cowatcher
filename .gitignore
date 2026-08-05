@@ -12,3 +12,4 @@ venv/
 data/
 models/
 whisper_models/
+.cowatcher-objects/

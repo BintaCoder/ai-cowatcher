@@ -80,6 +80,7 @@ def test_metrics_endpoint_exports_ask_histogram(prom_session, prom_settings: Set
     assert "cowatcher_ask_request_duration_seconds" in body
     assert "cowatcher_ask_model_tier_total" in body
     assert "cowatcher_tool_call_duration_seconds" in body
+    assert "cowatcher_ask_stage_duration_seconds" in body
 
 
 def test_metrics_disabled_returns_404():

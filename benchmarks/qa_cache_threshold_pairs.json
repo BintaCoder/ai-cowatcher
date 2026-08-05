@@ -1,0 +1,71 @@
+{
+  "description": "Labeled near-dup vs different question pairs for QA semantic threshold tuning.",
+  "pairs": [
+    {
+      "question_a": "What's going on?",
+      "question_b": "What's going on in this scene?",
+      "same_intent": true,
+      "note": "playhead status paraphrases"
+    },
+    {
+      "question_a": "What just happened?",
+      "question_b": "What happened?",
+      "same_intent": true,
+      "note": "recent beat"
+    },
+    {
+      "question_a": "Who is that?",
+      "question_b": "Who's on screen?",
+      "same_intent": true,
+      "note": "identity"
+    },
+    {
+      "question_a": "Who is that guy talking right now?",
+      "question_b": "Who is talking?",
+      "same_intent": true,
+      "note": "speaker identity"
+    },
+    {
+      "question_a": "Why does he look so upset?",
+      "question_b": "Why is he upset?",
+      "same_intent": true,
+      "note": "emotion"
+    },
+    {
+      "question_a": "Who just walked in?",
+      "question_b": "Who came in?",
+      "same_intent": true,
+      "note": "entrance"
+    },
+    {
+      "question_a": "What's going on?",
+      "question_b": "Make a joke about this",
+      "same_intent": false,
+      "note": "status vs joke"
+    },
+    {
+      "question_a": "Who is that?",
+      "question_b": "Is this before or after the divorce?",
+      "same_intent": false,
+      "note": "identity vs timeline plot"
+    },
+    {
+      "question_a": "What just happened?",
+      "question_b": "Who is Ross supposed to be into?",
+      "same_intent": false,
+      "note": "beat vs romantic plot"
+    },
+    {
+      "question_a": "Why is he upset?",
+      "question_b": "What apartment are they in?",
+      "same_intent": false,
+      "note": "emotion vs location"
+    },
+    {
+      "question_a": "Who just walked in?",
+      "question_b": "Summarize the last thirty seconds without spoilers",
+      "same_intent": false,
+      "note": "entrance vs recap"
+    }
+  ]
+}

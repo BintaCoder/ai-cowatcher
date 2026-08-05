@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -10,6 +11,24 @@ from sqlalchemy.orm import Session
 from ai_cowatcher.db.models import SceneEvent, TitleEvent, TitleIngestion
 from ai_cowatcher.domain import SceneEventRecord, TitleEventRecord
 from ai_cowatcher.observability.prometheus_metrics import observe_storage_query
+
+
+def is_ephemeral_title_id(title_id: str) -> bool:
+    """Pytest / CI fixture titles that should not appear in the pilot UI."""
+    tid = (title_id or "").lower()
+    return tid.startswith("nav-") or tid.startswith("demo-web")
+
+
+def video_file_on_disk(video_path: str | None) -> bool:
+    if not video_path or not str(video_path).strip():
+        return False
+    path = Path(video_path).expanduser()
+    if path.is_file():
+        return True
+    # Relative paths from ingest CLI when cwd was the project root.
+    if not path.is_absolute():
+        return Path.cwd().joinpath(path).is_file()
+    return False
 
 
 class SceneEventRepository:
@@ -25,6 +44,34 @@ class SceneEventRepository:
         if title is None or not title.display_name:
             return None
         return title.display_name
+
+    def get_cast_cache(self, title_id: str) -> dict | None:
+        """Return ingested cast payload for a title, or None if missing."""
+        with observe_storage_query("postgres", "get_cast_cache"):
+            title = self.get_title(title_id)
+        if title is None:
+            return None
+        payload = getattr(title, "cast_cache", None)
+        if not payload or not isinstance(payload, dict):
+            return None
+        return dict(payload)
+
+    def save_cast_cache(self, title_id: str, cast_payload: dict) -> None:
+        """Persist full cast list extracted during offline ingest."""
+        title = self.get_title(title_id)
+        if title is None:
+            raise ValueError(f"Unknown title_id {title_id}")
+        title.cast_cache = dict(cast_payload)
+        title.cast_cached_at = datetime.now(UTC)
+        self._session.commit()
+
+    def clear_cast_cache(self, title_id: str) -> None:
+        title = self.get_title(title_id)
+        if title is None:
+            return
+        title.cast_cache = None
+        title.cast_cached_at = None
+        self._session.commit()
 
     def set_display_name(self, title_id: str, display_name: str) -> None:
         title = self.get_title(title_id)
@@ -131,6 +178,7 @@ class SceneEventRepository:
             caption=event.caption,
             face_cluster_ids=event.face_cluster_ids,
             speaker_cluster_ids=event.speaker_cluster_ids,
+            audio_object_key=event.audio_object_key,
         )
         self._session.merge(row)
 
@@ -147,13 +195,34 @@ class SceneEventRepository:
         stmt = select(SceneEvent).where(SceneEvent.title_id == title_id)
         return len(self._session.scalars(stmt).all())
 
-    def list_completed_titles(self) -> list[TitleIngestion]:
+    def list_completed_titles(
+        self,
+        *,
+        exclude_ephemeral: bool = True,
+        require_video_file: bool = True,
+    ) -> list[TitleIngestion]:
+        """List completed titles for the watch UI.
+
+        Filters out pytest fixture titles (nav-*/demo-web*) and rows whose
+        video file is no longer on disk so the dropdown auto-select never
+        points at a 404.
+        Ordered newest update first, then higher scene_count as a tie-break.
+        """
         stmt = (
             select(TitleIngestion)
             .where(TitleIngestion.status == "completed")
-            .order_by(TitleIngestion.title_id)
+            .order_by(
+                TitleIngestion.updated_at.desc(),
+                TitleIngestion.scene_count.desc(),
+                TitleIngestion.title_id,
+            )
         )
-        return list(self._session.scalars(stmt).all())
+        titles = list(self._session.scalars(stmt).all())
+        if exclude_ephemeral:
+            titles = [t for t in titles if not is_ephemeral_title_id(t.title_id)]
+        if require_video_file:
+            titles = [t for t in titles if video_file_on_disk(t.video_path)]
+        return titles
 
     def list_scene_records(self, title_id: str) -> list[SceneEventRecord]:
         stmt = (
@@ -177,6 +246,7 @@ class SceneEventRepository:
                     caption=row.caption,
                     face_cluster_ids=list(row.face_cluster_ids or []),
                     speaker_cluster_ids=list(row.speaker_cluster_ids or []),
+                    audio_object_key=getattr(row, "audio_object_key", None),
                 )
             )
         return records

@@ -22,6 +22,20 @@ class MockAudioExtractor:
             handle.write(b"mock-audio")
         return output_path
 
+    def extract_audio_window(
+        self,
+        source_path: str,
+        output_path: str,
+        *,
+        start_ts: float,
+        end_ts: float,
+    ) -> str:
+        del source_path
+        payload = f"mock-window:{start_ts:.2f}-{end_ts:.2f}".encode("utf-8")
+        with open(output_path, "wb") as handle:
+            handle.write(payload)
+        return output_path
+
 
 class MockTranscriber:
     def transcribe_window(self, audio_path: str, start_ts: float, end_ts: float) -> str:

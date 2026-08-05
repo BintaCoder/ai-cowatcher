@@ -47,6 +47,13 @@ _CRASH_PATTERNS = [
     re.compile(r"\bexplod", re.I),
 ]
 
+# Heuristic reveal moments for Prediction Mode (curated tags preferred when available).
+_REVEAL_PATTERNS = [
+    re.compile(r"\b(the killer is|it was .+ all along)\b", re.I),
+    re.compile(r"\b(unmasks?|confess(?:es|ed|ion)|reveals? the truth)\b", re.I),
+    re.compile(r"\b(identity (?:of|is) (?:the )?(?:killer|culprit))\b", re.I),
+]
+
 
 class _SceneText:
     __slots__ = ("scene_id", "start_ts", "end_ts", "text")
@@ -170,6 +177,30 @@ def detect_actor_appearances(
     return events
 
 
+def detect_reveal_points(
+    title_id: str,
+    scenes: list[SceneEventRecord],
+) -> list[TitleEventRecord]:
+    """Tag likely plot-reveal moments for Prediction Mode reveal_ts."""
+    events: list[TitleEventRecord] = []
+    ordinal = 0
+    for scene in _scene_texts(scenes):
+        if not _matches_any(scene.text, _REVEAL_PATTERNS):
+            continue
+        ordinal += 1
+        events.append(
+            _make_event(
+                title_id=title_id,
+                event_type="reveal_point",
+                ordinal=ordinal,
+                scene=scene,
+                label=f"Reveal point {ordinal}",
+                metadata={"prediction_topics": ["killer_reveal", "general"]},
+            )
+        )
+    return events
+
+
 def build_title_events(
     title_id: str,
     scenes: list[SceneEventRecord],
@@ -177,6 +208,7 @@ def build_title_events(
 ) -> tuple[list[TitleEventRecord], float | None]:
     sports = detect_pattern_events(title_id, scenes, _SPORTS_PATTERNS)
     crashes = detect_pattern_events(title_id, scenes, {"crash": _CRASH_PATTERNS})
+    reveals = detect_reveal_points(title_id, scenes)
     actors = detect_actor_appearances(title_id, scenes, cast_names or [])
     credits_ts = detect_credits_start(scenes)
 
@@ -196,7 +228,7 @@ def build_title_events(
             )
         )
 
-    all_events = sports + crashes + actors + credits_events
+    all_events = sports + crashes + reveals + actors + credits_events
     all_events.sort(key=lambda event: (event.start_ts, event.event_type, event.ordinal))
     return all_events, credits_ts
 

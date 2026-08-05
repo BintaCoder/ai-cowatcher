@@ -58,7 +58,7 @@
       flex-wrap: wrap;
     }
     label { color: var(--muted); font-size: 0.85rem; }
-    select, button {
+    select, button, input[type="text"] {
       font: inherit;
       border-radius: 10px;
       border: 1px solid var(--border);
@@ -67,6 +67,10 @@
       padding: 0.55rem 0.85rem;
     }
     select { min-width: 220px; }
+    #questionInput {
+      flex: 1 1 220px;
+      min-width: 180px;
+    }
     button {
       cursor: pointer;
       transition: background 0.15s ease, transform 0.05s ease;
@@ -74,12 +78,32 @@
     button:hover:not(:disabled) { background: #1a2130; }
     button:active:not(:disabled) { transform: translateY(1px); }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
-    #micBtn.listening {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #fff;
+    #listenBadge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.4rem 0.75rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.85rem;
+      user-select: none;
     }
-    #micBtn.listening:hover { background: var(--accent-pressed); }
+    #listenBadge.on {
+      border-color: var(--accent);
+      color: #cfe0ff;
+      background: rgba(91, 140, 255, 0.12);
+    }
+    #listenBadge .dot {
+      width: 0.55rem;
+      height: 0.55rem;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    #listenBadge.on .dot {
+      background: var(--ok);
+      box-shadow: 0 0 0 3px rgba(91, 209, 138, 0.25);
+    }
     video {
       width: 100%;
       max-height: 62vh;
@@ -148,12 +172,24 @@
     <header>
       <div>
         <h1>Co-watcher</h1>
-        <div class="subtitle">Watch, ask out loud, get a spoiler-safe answer</div>
+        <div class="subtitle">Say <strong>Hey</strong> then your question — co-watcher answers briefly</div>
       </div>
       <div class="controls">
         <label for="titleSelect">Title</label>
         <select id="titleSelect" disabled>
           <option value="">Loading titles…</option>
+        </select>
+        <label for="personaSelect">Companion</label>
+        <select id="personaSelect" title="Personality tone for answers">
+          <option value="easygoing_friend">Easygoing Friend</option>
+          <option value="witty_friend">Witty Friend</option>
+          <option value="calm_scout">Calm Scout</option>
+        </select>
+        <label for="genderSelect">Voice</label>
+        <select id="genderSelect" title="Preferred speech voice gender">
+          <option value="female">Female</option>
+          <option value="male">Male</option>
+          <option value="neutral">Neutral</option>
         </select>
       </div>
     </header>
@@ -161,11 +197,41 @@
     <section class="panel">
       <video id="player" controls playsinline preload="metadata"></video>
       <div class="toolbar">
-        <button id="micBtn" type="button" disabled>Hold to ask (mic)</button>
-        <button id="resumeBtn" type="button" disabled>Resume video</button>
+        <span id="listenBadge" class="" title="Mic awaits the wake word Hey, then your question">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="listenBadgeText">Mic idle</span>
+        </span>
         <label class="nav-toggle"><input id="navigationMode" type="checkbox" checked /> Navigate mode (jump to moments)</label>
+        <label class="nav-toggle" title="State-driven GainNode duck while you or the AI speak (1.5s silence hold; never restarts the mic stream)">
+          <input id="duckWhileTalking" type="checkbox" checked /> Duck volume while talking
+        </label>
+        <label
+          class="nav-toggle"
+          title="Hands-free wake word (Hey). Off by default for latency/quality tests."
+        >
+          <input id="autoListenMic" type="checkbox" /> Auto listen (wake word)
+        </label>
+        <label
+          class="nav-toggle"
+          title="Occasional production trivia (off by default). Never plot spoilers."
+        >
+          <input id="triviaToggle" type="checkbox" /> Occasional trivia
+        </label>
+        <button
+          id="holdTalkBtn"
+          type="button"
+          title="Hold and speak — program volume ducks while held (no Hey needed)"
+          style="cursor:pointer;border:1px solid #666;background:#222;color:inherit;padding:0.25rem 0.65rem;border-radius:4px;font:inherit;"
+        >Hold to talk</button>
       </div>
-      <p class="hint">Hold <strong>Space</strong> or press and hold the mic button while you speak. Ask questions normally, or say <strong>"take me to 10 minutes"</strong>, <strong>"second fight"</strong>, <strong>"first goal"</strong>, <strong>"credits"</strong>, or <strong>"where does [actor] appear"</strong> to jump.</p>
+      <div class="toolbar">
+        <input id="questionInput" type="text" placeholder="Type · or Hold to talk · or Auto listen + Hey…" autocomplete="off" />
+        <button id="sendBtn" type="button" disabled>Ask</button>
+      </div>
+      <p class="hint">
+        Prefer <strong>Hold to talk</strong> for voice (press-and-hold; video ducks while you speak, no wake word).
+        Or enable <em>Auto listen</em> and say <strong>Hey, who’s that?</strong>. Typing always works.
+      </p>
       <div id="status" class="status">Pick a title to start.</div>
     </section>
 
@@ -178,29 +244,221 @@
         <h3>Co-watcher</h3>
         <p id="answerText">—</p>
       </div>
+      <div class="bubble">
+        <h3>Your guesses</h3>
+        <ul id="predictionLog" style="margin:0;padding-left:1.1rem;font-size:0.92rem;opacity:0.9;">
+          <li id="predictionLogEmpty">None yet — try “I bet she’s lying.”</li>
+        </ul>
+      </div>
     </section>
   </div>
 
+
+  <script src="/watch/smart_ai_ducker.js"></script>
+  <!-- Legacy RMS duck helpers are not loaded; state-driven SmartAIDucker owns program gain. -->
   <script>
     const player = document.getElementById("player");
     const titleSelect = document.getElementById("titleSelect");
-    const micBtn = document.getElementById("micBtn");
-    const resumeBtn = document.getElementById("resumeBtn");
+    const personaSelect = document.getElementById("personaSelect");
+    const genderSelect = document.getElementById("genderSelect");
+    const listenBadge = document.getElementById("listenBadge");
+    const listenBadgeText = document.getElementById("listenBadgeText");
+    const sendBtn = document.getElementById("sendBtn");
+    const questionInput = document.getElementById("questionInput");
     const navigationMode = document.getElementById("navigationMode");
+    const duckWhileTalking = document.getElementById("duckWhileTalking");
+    const autoListenMic = document.getElementById("autoListenMic");
+    const triviaToggle = document.getElementById("triviaToggle");
+    const holdTalkBtn = document.getElementById("holdTalkBtn");
     const statusEl = document.getElementById("status");
     const questionText = document.getElementById("questionText");
     const answerText = document.getElementById("answerText");
+    const predictionLog = document.getElementById("predictionLog");
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const synth = window.speechSynthesis;
 
     const USER_ID = "web-viewer";
-    const NAV_INTENT_RE = /\b(go to|jump to|skip to|take me to|show me|find|where does|where is|when does)\b/i;
+    const LS_PERSONA = "cowatcher.persona_id";
+    const LS_GENDER = "cowatcher.companion_gender";
+    /** Continuous auto-listen; default off for latency/quality tests. */
+    const LS_AUTO_LISTEN = "cowatcher.auto_listen_mic";
+    /** Occasional trivia; default off (hard opt-in). */
+    const LS_TRIVIA = "cowatcher.trivia_opt_in";
+    /** Persona TTS presets (rate / pitch) — mirrors server persona JSON. */
+    const PERSONA_TTS = {
+      witty_friend: { rate: 1.06, pitch: 1.05 },
+      easygoing_friend: { rate: 0.98, pitch: 1.0 },
+      calm_scout: { rate: 0.95, pitch: 0.95 },
+    };
+
+    /** Client pacing for /trivia/tick (server also enforces). */
+    let triviaSurfacedIds = [];
+    let triviaLastSurfacedTs = null;
+    let triviaLastAskTs = null;
+    let triviaCount = 0;
+    let triviaTickTimer = null;
+    let predictionPollTimer = null;
+    let predictionRevealedIds = new Set();
+    let titleEndedFlag = false;
+
+    function loadCompanionPrefs() {
+      try {
+        // Default false when key missing — no continuous ambient mic (isolation tests).
+        if (autoListenMic) {
+          const raw = localStorage.getItem(LS_AUTO_LISTEN);
+          autoListenMic.checked = raw === "1" || raw === "true";
+        }
+        if (triviaToggle) {
+          const rawT = localStorage.getItem(LS_TRIVIA);
+          triviaToggle.checked = rawT === "1" || rawT === "true";
+        }
+        const p = localStorage.getItem(LS_PERSONA);
+        if (p && personaSelect && [...personaSelect.options].some((o) => o.value === p)) {
+          personaSelect.value = p;
+        }
+        const g = localStorage.getItem(LS_GENDER);
+        if (g && genderSelect && [...genderSelect.options].some((o) => o.value === g)) {
+          genderSelect.value = g;
+        }
+      } catch (_) { /* ignore */ }
+    }
+
+    function triviaEnabled() {
+      return Boolean(triviaToggle && triviaToggle.checked);
+    }
+
+    function persistTriviaPref() {
+      try {
+        localStorage.setItem(LS_TRIVIA, triviaEnabled() ? "1" : "0");
+      } catch (_) {}
+    }
+
+    function predictionSessionId(titleId) {
+      return `${USER_ID}:${titleId}`;
+    }
+
+    function saveCompanionPrefs() {
+      try {
+        if (personaSelect) localStorage.setItem(LS_PERSONA, personaSelect.value);
+        if (genderSelect) localStorage.setItem(LS_GENDER, genderSelect.value);
+      } catch (_) { /* ignore */ }
+    }
+
+    function currentPersonaId() {
+      return (personaSelect && personaSelect.value) || "easygoing_friend";
+    }
+
+    function currentCompanionGender() {
+      return (genderSelect && genderSelect.value) || "female";
+    }
+
+    function pickVoiceForGender(gender) {
+      if (!synth || typeof synth.getVoices !== "function") return null;
+      const voices = synth.getVoices() || [];
+      if (!voices.length) return null;
+      const g = (gender || "neutral").toLowerCase();
+      const score = (v) => {
+        const name = `${v.name || ""} ${v.lang || ""}`.toLowerCase();
+        let s = 0;
+        if (v.lang && v.lang.toLowerCase().startsWith("en")) s += 3;
+        if (g === "female") {
+          if (/\b(female|woman|zira|samantha|karen|moira|tessa|fiona|victoria|google us english female)\b/.test(name)) s += 5;
+          if (/\b(male|david|daniel|mark|alex|fred|rishi)\b/.test(name)) s -= 3;
+        } else if (g === "male") {
+          if (/\b(male|david|daniel|mark|alex|fred|rishi|google us english male)\b/.test(name)) s += 5;
+          if (/\b(female|woman|zira|samantha|karen|moira|tessa|fiona|victoria)\b/.test(name)) s -= 3;
+        } else {
+          // neutral: prefer non-extreme names, still English first
+          if (/\b(neural|natural|enhanced)\b/.test(name)) s += 1;
+        }
+        return s;
+      };
+      let best = voices[0];
+      let bestScore = score(best);
+      for (const v of voices) {
+        const sc = score(v);
+        if (sc > bestScore) {
+          best = v;
+          bestScore = sc;
+        }
+      }
+      return best;
+    }
+
+    function applyUtteranceVoice(utterance) {
+      const personaId = currentPersonaId();
+      const gender = currentCompanionGender();
+      const tts = PERSONA_TTS[personaId] || { rate: 1.0, pitch: 1.0 };
+      utterance.rate = Math.min(1.4, Math.max(0.7, tts.rate || 1));
+      utterance.pitch = Math.min(1.5, Math.max(0.5, tts.pitch || 1));
+      const voice = pickVoiceForGender(gender);
+      if (voice) utterance.voice = voice;
+    }
+
+    if (personaSelect) {
+      personaSelect.addEventListener("change", saveCompanionPrefs);
+    }
+    if (genderSelect) {
+      genderSelect.addEventListener("change", saveCompanionPrefs);
+    }
+    loadCompanionPrefs();
+    // Chromium loads voices asynchronously
+    if (synth && typeof synth.onvoiceschanged !== "undefined") {
+      synth.onvoiceschanged = () => { /* warm voice list */ synth.getVoices(); };
+    }
+    /** Min gap between STT sessions — prevents Chromium speech-process thrash. */
+    const LISTEN_COOLDOWN_MS = 1800;
+    /** Rebuild SpeechRecognition periodically (handlers + internal buffers). */
+    const RECREATE_AFTER_SESSIONS = 12;
+    const MAX_STARTS_PER_MIN = 25;
+    /** SmartAIDucker timings — multi-tier duck; instant user cut for Hold-to-talk. */
+    const USER_DUCK_VOLUME = 0.2;
+    const GEMINI_DUCK_VOLUME = 0.05;
+    const DUCK_ATTACK_SEC = 0.02;
+    const GEMINI_DUCK_SEC = 0.2;
+    const DUCK_RECOVER_SEC = 0.6;
+    const DUCK_HOLD_MS = 1500;
+    /** Extra recovery silence when AirPods / BT sink is bound (~150–200 ms air delay). */
+    const DUCK_BT_OFFSET_MS = 150;
+    const DUCK_SAMPLE_RATE = 48000;
+    /** After quieting program audio, re-open STT once gain has settled (does not restart mic stream). */
+    const PROGRAM_BLEED_RESTART_MS = 480;
+    /** Treat STT as "user" only after program was quieted (or show is not audible). */
+    const USER_LISTEN_WINDOW_MS = 6000;
+
+    const NAV_INTENT_RE = /\b(go to|jump to|skip to|take me to|show me|find|where does|where is|when does|rewind|fast[\s-]?forward|seek)\b/i;
+    const JOKE_INTENT_RE = /\b(tell me a joke|got a (?:good )?joke|make me laugh|say something funny|one[\s-]?liner|be funny|any jokes?|jokes?)\b/i;
+    const GO_TO_TIME_RE = /\b(?:go|jump|skip|take me)\s+to\s+(\d{1,2}:\d{2}(?::\d{2})?|\d+(?:\.\d+)?\s*(?:hours?|hrs?|h|minutes?|mins?|m))\b/i;
+    const CLOCK_RE = /\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b/;
+    const DURATION_RE = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi;
+    const FILLER_ONLY_RE = /^(um+|uh+|uhm+|erm+|hmm+|mm+|mhm+|ah+|oh+|huh+|yeah|yep|ok|okay|so|like|well)\.?$/i;
+    /** Wake word — only phrases with this become voice questions (typed path skips it). */
+    const WAKE_WORD_RE = /\b(?:hey|hay)\b(?:\s+(?:co[- ]?watcher|cowatcher|there))?\b/i;
+
+    /**
+     * @returns {null | { wakeOnly: true } | { question: string }}
+     * null = no wake word (ignore as program / noise)
+     */
+    function parseWakeUtterance(raw, opts) {
+      const text = (raw || "").replace(/\s+/g, " ").trim();
+      if (!text) return null;
+      // Hold-to-talk: whole utterance is the question (no Hey required).
+      if (opts && opts.pushToTalk) {
+        return { question: text };
+      }
+      const match = text.match(WAKE_WORD_RE);
+      if (!match) return null;
+      const after = text.slice(match.index + match[0].length).replace(/^[\s,.\-–—:;!?]+/, "").trim();
+      if (!after) return { wakeOnly: true };
+      return { question: after };
+    }
 
     function isNavigationQuestion(question) {
+      if (JOKE_INTENT_RE.test(question)) return false;
       if (navigationMode && navigationMode.checked) {
         if (NAV_INTENT_RE.test(question)) return true;
-        if (/\b(first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(goal|fight|point|six|wicket|touchdown)\b/i.test(question)) return true;
+        if (/\b(first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+(goal|fight|point|six|wicket|touchdown|scene|kiss|moment)\b/i.test(question)) return true;
         if (/\b(credits?|post[- ]credits?)\b/i.test(question)) return true;
         if (/\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(question)) return true;
         if (/\b\d+(?:\.\d+)?\s*(?:minutes?|mins?|hours?|hrs?)\b/i.test(question)) return true;
@@ -209,35 +467,438 @@
       return NAV_INTENT_RE.test(question);
     }
 
+    function isClientNoise(question) {
+      const q = (question || "").trim();
+      if (!q || q.length < 2) return true;
+      if (FILLER_ONLY_RE.test(q)) return true;
+      return false;
+    }
+
+    function parseClientSeekTimestamp(question) {
+      if (!question) return null;
+      const goMatch = question.match(GO_TO_TIME_RE);
+      if (goMatch) {
+        const fragment = goMatch[1];
+        if (fragment.includes(":")) return parseClockFragment(fragment);
+        const duration = parseDurationSeconds(question);
+        if (duration != null) return duration;
+      }
+      const clock = parseClockFragment(question);
+      if (clock != null) return clock;
+      return parseDurationSeconds(question);
+    }
+
+    function parseClockFragment(text) {
+      const match = text.match(CLOCK_RE);
+      if (!match) return null;
+      let hours = 0, minutes, seconds;
+      if (match[3] != null) {
+        hours = parseInt(match[1], 10);
+        minutes = parseInt(match[2], 10);
+        seconds = parseInt(match[3], 10);
+      } else if (parseInt(match[1], 10) > 59) {
+        hours = parseInt(match[1], 10);
+        minutes = parseInt(match[2], 10);
+        seconds = 0;
+      } else {
+        minutes = parseInt(match[1], 10);
+        seconds = parseInt(match[2], 10);
+      }
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+
+    function parseDurationSeconds(text) {
+      let total = 0, found = false;
+      DURATION_RE.lastIndex = 0;
+      let match;
+      while ((match = DURATION_RE.exec(text)) !== null) {
+        found = true;
+        const value = parseFloat(match[1]);
+        const unit = match[2].toLowerCase();
+        if (unit.startsWith("h")) total += value * 3600;
+        else if (unit.startsWith("m")) total += value * 60;
+        else total += value;
+      }
+      return found ? total : null;
+    }
+
     function applySeek(seekToTs) {
       if (seekToTs == null || Number.isNaN(seekToTs)) return;
       player.currentTime = Math.max(0, seekToTs);
       player.play().catch(() => {});
-      pausedForAsk = false;
-      resumeBtn.disabled = true;
     }
 
     let recognition = null;
     let listening = false;
+    let listenDesired = false;
     let askInFlight = false;
-    let pausedForAsk = false;
+    let ttsSpeaking = false;
     let capturedTs = 0;
-    let finalTranscript = "";
-    let spaceHeld = false;
-    let micHeld = false;
+    let sessionTranscript = "";
+    let sessionConfidence = 0;
+    /** Hold-to-talk: skip wake word; duck program while pressed. */
+    let pushToTalkActive = false;
+    let restartListenTimer = null;
+    let thinkingTimer = null;
+    let lastListenStartMs = 0;
+    let sessionCount = 0;
+    let startTimestamps = [];
+    let activeStreamAbort = null;
+    let activeSpeaker = null;
+
+    // SmartAIDucker — state-driven program ducking (no amplitude VAD) ----------
+    // Duck when user OR AI speaking (or ask pipeline active). Recover only after
+    // 1.5s continuous silence. Mic amplitude metering was removed — user speech
+    // comes from PTT / SpeechRecognition / optional external Silero VAD hooks.
+    // Does not cancel TTS; only lowers program GainNode.
+    let smartDucker = null;
+    let smartDuckerPromise = null;
+    /** Ref-count style flags so PTT + speech don't race onUserSpeechEnd. */
+    const userSpeechReasons = new Set(); // "ptt" | "speech"
+    let pipelineAskActive = false;
+    let aiTtsActive = false;
+    /** After we quiet program audio, allow user STT for a short window. */
+    let userListenUntilMs = 0;
+    let quietingProgram = false;
+    let activeUtterance = null;
+
+    function duckEnabled() {
+      return !duckWhileTalking || duckWhileTalking.checked;
+    }
+
+    function programIsAudible() {
+      if (!player) return false;
+      if (player.paused || player.ended || player.muted) return false;
+      if ((player.volume || 0) <= 0.04) return false;
+      if (smartDucker) {
+        const snap = typeof smartDucker.getState === "function" ? smartDucker.getState() : null;
+        if (snap && snap.ducked && (snap.gain || 0) <= 0.04) return false;
+      }
+      return (player.readyState || 0) >= 2;
+    }
+
+    function userListenArmed() {
+      return Date.now() < userListenUntilMs;
+    }
+
+    function armUserListenWindow(ms = USER_LISTEN_WINDOW_MS) {
+      userListenUntilMs = Date.now() + ms;
+    }
+
+    function syncSmartDuckerFlags() {
+      if (!smartDucker) return;
+      try {
+        const wantUser = userSpeechReasons.size > 0;
+        if (wantUser && !smartDucker.isUserSpeaking) smartDucker.onUserSpeechStart();
+        else if (!wantUser && smartDucker.isUserSpeaking) smartDucker.onUserSpeechEnd();
+      } catch (_) { /* destroyed */ }
+      try {
+        if (aiTtsActive && !smartDucker.isAISpeaking) {
+          if (typeof smartDucker.onGeminiSpeechStart === "function") {
+            smartDucker.onGeminiSpeechStart();
+          } else {
+            smartDucker.onAISpeechStart();
+          }
+        } else if (!aiTtsActive && smartDucker.isAISpeaking) {
+          if (typeof smartDucker.onGeminiSpeechEnd === "function") {
+            smartDucker.onGeminiSpeechEnd();
+          } else {
+            smartDucker.onAISpeechEnd();
+          }
+        }
+      } catch (_) { /* destroyed */ }
+      try {
+        const snap = typeof smartDucker.getState === "function" ? smartDucker.getState() : null;
+        const pipelineOn = snap ? !!snap.pipelineActive : false;
+        if (pipelineAskActive !== pipelineOn) {
+          smartDucker.setPipelineActive(pipelineAskActive);
+        }
+      } catch (_) {
+        try { smartDucker.setPipelineActive(pipelineAskActive); } catch (_2) { /* */ }
+      }
+    }
+
+    /**
+     * Bridge from legacy reason strings → SmartAIDucker hooks.
+     * ambient is a no-op (listening alone must not duck — that caused noise false triggers).
+     */
+    function setDuckReason(reason, active) {
+      if (reason === "ambient") return;
+      if (!duckEnabled() && active) return;
+      void ensureSmartDucker();
+      if (reason === "ptt" || reason === "speech") {
+        if (active) userSpeechReasons.add(reason);
+        else userSpeechReasons.delete(reason);
+      } else if (reason === "tts") {
+        aiTtsActive = !!active;
+      } else if (reason === "ask") {
+        pipelineAskActive = !!active;
+      }
+      syncSmartDuckerFlags();
+    }
+
+    /**
+     * Once-per-session: video → GainNode via SmartAIDucker.
+     * Does NOT open getUserMedia for amplitude VAD (avoids feedback / room-noise ducks).
+     */
+    async function ensureSmartDucker() {
+      if (smartDucker) {
+        try {
+          if (smartDucker.ctx && smartDucker.ctx.state === "suspended") {
+            await smartDucker.ctx.resume();
+          }
+        } catch (_) { /* gesture */ }
+        return smartDucker;
+      }
+      if (smartDuckerPromise) return smartDuckerPromise;
+
+      smartDuckerPromise = (async () => {
+        const Ctor = window.CowatcherAudio && window.CowatcherAudio.SmartAIDucker;
+        if (!Ctor) return null;
+        try {
+          const ducker = new Ctor(player, {
+            userDuckVolume: USER_DUCK_VOLUME,
+            geminiDuckVolume: GEMINI_DUCK_VOLUME,
+            userCutSec: DUCK_ATTACK_SEC,
+            geminiDuckSec: GEMINI_DUCK_SEC,
+            recoverySec: DUCK_RECOVER_SEC,
+            holdMs: DUCK_HOLD_MS,
+            bluetoothOffsetMs: DUCK_BT_OFFSET_MS,
+            sampleRate: DUCK_SAMPLE_RATE,
+            enabled: duckEnabled(),
+          });
+          // Graph only — no openMic (SpeechRecognition / external VAD own the mic).
+          await ducker.start();
+          smartDucker = ducker;
+          syncSmartDuckerFlags();
+          void maybeBindAirPodsOutput(ducker);
+          return ducker;
+        } catch (err) {
+          if (typeof console !== "undefined" && console.warn) {
+            console.warn("[watch] SmartAIDucker start failed", err);
+          }
+          return null;
+        }
+      })();
+
+      try {
+        const d = await smartDuckerPromise;
+        if (!d) smartDuckerPromise = null;
+        return d;
+      } catch (_) {
+        smartDuckerPromise = null;
+        return null;
+      }
+    }
+
+    /**
+     * Query enumerateDevices for AirPods / BT output and lock video + AudioContext
+     * onto the same sinkId (avoids laptop-speaker vs earbud destination mismatch).
+     */
+    async function maybeBindAirPodsOutput(ducker) {
+      if (!ducker || typeof ducker.bindToAirPods !== "function") return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+      try {
+        // Labels require a prior permission grant; warm with a no-op getUserMedia if needed.
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const find =
+          (window.CowatcherAudio && window.CowatcherAudio.findAirPodsOutput)
+          || null;
+        const match = find
+          ? find(devices)
+          : devices.find(
+            (d) =>
+              d.kind === "audiooutput"
+              && /airpods|bluetooth|headset|buds/i.test(d.label || "")
+          );
+        if (match && match.deviceId) {
+          await ducker.bindToAirPods(match.deviceId);
+        }
+      } catch (_) {
+        /* sink binding is best-effort */
+      }
+    }
+
+    /** Warm Web Audio graph on user gesture (autoplay policy). Idempotent. */
+    function warmAudioSessionFromGesture() {
+      if (duckEnabled()) void ensureSmartDucker();
+    }
+
+    /** @deprecated ambient listen no longer ducks program audio. */
+    function syncAmbientDuck() {
+      /* intentional no-op — duck only on user/AI/pipeline state */
+    }
+
+    /**
+     * Mic often hears speaker → treat as program bleed.
+     * Quiet program via SmartAIDucker and drop this STT round; next round is the viewer.
+     * Does not stop any MediaStream / AudioContext.
+     */
+    function suppressProgramBleedAndRelisten() {
+      if (quietingProgram || askInFlight || ttsSpeaking) return;
+      quietingProgram = true;
+      sessionTranscript = "";
+      sessionConfidence = 0;
+      setDuckReason("speech", true);
+      armUserListenWindow();
+      updateListenBadge("on", "Quieting program…");
+      setStatus("Program audio quieted — say your question now.", "ok");
+      if (recognition) {
+        const rec = recognition;
+        rec.onresult = null;
+        rec.onspeechstart = null;
+        rec.onspeechend = null;
+        rec.onend = () => {
+          listening = false;
+          quietingProgram = false;
+          scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+        };
+        try { rec.abort(); } catch (_) {
+          try { rec.stop(); } catch (_) {}
+          quietingProgram = false;
+          scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+        }
+      } else {
+        quietingProgram = false;
+        scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+      }
+    }
+
+    player.addEventListener("play", () => {
+      warmAudioSessionFromGesture();
+    });
+
+    if (duckWhileTalking) {
+      duckWhileTalking.addEventListener("change", () => {
+        if (!duckWhileTalking.checked) {
+          userSpeechReasons.clear();
+          pipelineAskActive = false;
+          aiTtsActive = false;
+          if (smartDucker) {
+            try { smartDucker.reset(true); } catch (_) {}
+            try { smartDucker.setEnabled(false); } catch (_) {}
+          }
+        } else {
+          warmAudioSessionFromGesture();
+          if (smartDucker) {
+            try { smartDucker.setEnabled(true); } catch (_) {}
+          }
+          syncSmartDuckerFlags();
+        }
+      });
+    }
+
+    document.addEventListener("pointerdown", warmAudioSessionFromGesture, { passive: true });
+    document.addEventListener("keydown", warmAudioSessionFromGesture, { passive: true });
 
     function setStatus(text, kind = "") {
       statusEl.textContent = text;
       statusEl.className = "status" + (kind ? " " + kind : "");
     }
 
-    function speechSupported() {
-      return Boolean(SpeechRecognition) && Boolean(synth);
+    function updateListenBadge(state, label) {
+      if (!listenBadge) return;
+      listenBadge.classList.toggle("on", state === "on");
+      listenBadgeText.textContent = label;
     }
 
-    function setupRecognition() {
-      if (!SpeechRecognition) return null;
-      const rec = new SpeechRecognition();
+    function startThinkingStatus(baseText) {
+      const started = Date.now();
+      setStatus(baseText, "thinking");
+      if (thinkingTimer) clearInterval(thinkingTimer);
+      thinkingTimer = setInterval(() => {
+        const sec = ((Date.now() - started) / 1000).toFixed(1);
+        setStatus(`${baseText} (${sec}s)`, "thinking");
+      }, 500);
+    }
+
+    function stopThinkingStatus() {
+      if (thinkingTimer) {
+        clearInterval(thinkingTimer);
+        thinkingTimer = null;
+      }
+    }
+
+    function releaseControls() {
+      askInFlight = false;
+      sendBtn.disabled = !titleSelect.value;
+      questionInput.disabled = !titleSelect.value;
+      // Keep duck if TTS is about to/while speaking; otherwise restore.
+      if (!ttsSpeaking) setDuckReason("ask", false);
+      scheduleListenRestart(LISTEN_COOLDOWN_MS);
+    }
+
+    function speechSupported() { return Boolean(SpeechRecognition); }
+    function ttsSupported() { return Boolean(synth); }
+
+    function shouldBeListening() {
+      return (
+        listenDesired
+        && speechSupported()
+        && Boolean(titleSelect.value)
+        && !askInFlight
+        && !ttsSpeaking
+        && !document.hidden
+      );
+    }
+
+    function cancelSynth() {
+      if (synth) {
+        try { synth.cancel(); } catch (_) {}
+      }
+      activeUtterance = null;
+      ttsSpeaking = false;
+      setDuckReason("tts", false);
+    }
+
+    function disposeRecognition() {
+      if (restartListenTimer) {
+        clearTimeout(restartListenTimer);
+        restartListenTimer = null;
+      }
+      if (!quietingProgram) setDuckReason("speech", false);
+      if (!recognition) {
+        listening = false;
+        return;
+      }
+      const rec = recognition;
+      recognition = null;
+      listening = false;
+      rec.onstart = null;
+      rec.onspeechstart = null;
+      rec.onspeechend = null;
+      rec.onresult = null;
+      rec.onerror = null;
+      rec.onend = null;
+      try { rec.abort(); } catch (_) {
+        try { rec.stop(); } catch (_) {}
+      }
+    }
+
+    function allowStartNow() {
+      const now = Date.now();
+      startTimestamps = startTimestamps.filter((t) => now - t < 60_000);
+      if (startTimestamps.length >= MAX_STARTS_PER_MIN) return false;
+      if (now - lastListenStartMs < LISTEN_COOLDOWN_MS) return false;
+      return true;
+    }
+
+    function recordStart() {
+      lastListenStartMs = Date.now();
+      startTimestamps.push(lastListenStartMs);
+      sessionCount += 1;
+    }
+
+    function scheduleListenRestart(delayMs = LISTEN_COOLDOWN_MS) {
+      if (restartListenTimer) clearTimeout(restartListenTimer);
+      restartListenTimer = setTimeout(() => {
+        restartListenTimer = null;
+        ensureListening();
+      }, Math.max(delayMs, LISTEN_COOLDOWN_MS));
+    }
+
+    function wireRecognition(rec) {
+      // One phrase per session — avoids continuous-mode Chromium memory growth.
       rec.continuous = false;
       rec.interimResults = true;
       rec.lang = "en-US";
@@ -245,131 +906,654 @@
 
       rec.onstart = () => {
         listening = true;
-        micBtn.classList.add("listening");
-        setStatus("Listening… release when done speaking.", "ok");
+        sessionTranscript = "";
+        sessionConfidence = 0;
+        syncAmbientDuck();
+        if (pushToTalkActive) {
+          updateListenBadge("on", "Talk now…");
+          setStatus("Hold-to-talk: speaking… release when done (volume ducked).", "ok");
+        } else {
+          updateListenBadge("on", "Say Hey…");
+          if (!askInFlight && !ttsSpeaking) {
+            setStatus('Listening for “Hey…”, then your question (e.g. Hey, who’s that?).', "ok");
+          }
+        }
+      };
+
+      rec.onspeechstart = () => {
+        if (askInFlight || ttsSpeaking) return;
+        updateListenBadge("on", pushToTalkActive ? "You're talking…" : "Say Hey…");
+        // Reinforce duck while the user is mid-phrase (PTT already ducked on press).
+        if (pushToTalkActive) setDuckReason("ptt", true);
+      };
+
+      rec.onspeechend = () => {
+        /* Hold hysteresis lives in SmartAIDucker (1.5s) — do not unduck here. */
       };
 
       rec.onresult = (event) => {
+        if (askInFlight || ttsSpeaking) return;
         let interim = "";
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
           const result = event.results[i];
-          const text = result[0].transcript.trim();
+          const alt = result[0];
+          const text = (alt.transcript || "").trim();
           if (!text) continue;
           if (result.isFinal) {
-            finalTranscript = `${finalTranscript} ${text}`.trim();
+            sessionTranscript = `${sessionTranscript} ${text}`.trim();
+            if (typeof alt.confidence === "number" && alt.confidence > 0) {
+              sessionConfidence = Math.max(sessionConfidence, alt.confidence);
+            }
           } else {
             interim = `${interim} ${text}`.trim();
           }
         }
-        const preview = (finalTranscript || interim || "").trim();
-        if (preview) questionText.textContent = preview;
+        const preview = (sessionTranscript || interim || "").trim();
+        const parsed = parseWakeUtterance(preview, { pushToTalk: pushToTalkActive });
+        if (!parsed) {
+          updateListenBadge("on", pushToTalkActive ? "Talk now…" : "Say Hey…");
+          return;
+        }
+        if (!pushToTalkActive) setDuckReason("speech", true);
+        else setDuckReason("ptt", true);
+        if (parsed.wakeOnly) {
+          questionText.textContent = "Hey…";
+          updateListenBadge("on", "Heard Hey…");
+          setStatus("Hey heard — add your question (Hey, what just happened?).", "ok");
+          return;
+        }
+        questionText.textContent = parsed.question;
+        updateListenBadge("on", "You're talking…");
       };
 
       rec.onerror = (event) => {
-        if (event.error === "no-speech") {
-          setStatus("Didn't catch speech — try again.", "error");
-        } else if (event.error !== "aborted") {
-          setStatus(`Speech error: ${event.error}`, "error");
-        }
-        cleanupListening();
-      };
-
-      rec.onend = async () => {
         listening = false;
-        micBtn.classList.remove("listening");
-        const question = finalTranscript.trim();
-        finalTranscript = "";
-        if (!question) {
-          if (!askInFlight) {
-            setStatus("No speech detected.", "error");
-            maybeResumeAfterCancel();
-          }
+        if (quietingProgram) {
+          if (event.error === "aborted" || event.error === "no-speech") return;
+          quietingProgram = false;
+        }
+        if (!pushToTalkActive) setDuckReason("speech", false);
+        syncAmbientDuck();
+        if (event.error === "no-speech" || event.error === "aborted") {
+          if (!pushToTalkActive) scheduleListenRestart(LISTEN_COOLDOWN_MS);
           return;
         }
-        await submitQuestion(question);
+        if (event.error === "not-allowed") {
+          listenDesired = false;
+          pushToTalkActive = false;
+          setDuckReason("ptt", false);
+          updateListenBadge("off", "Mic blocked");
+          setStatus("Microphone blocked — allow mic for this site, or type questions.", "error");
+          return;
+        }
+        setStatus(`Speech error: ${event.error}`, "error");
+        if (!pushToTalkActive) scheduleListenRestart(LISTEN_COOLDOWN_MS * 2);
       };
 
-      return rec;
+      rec.onend = () => {
+        listening = false;
+        if (quietingProgram) {
+          quietingProgram = false;
+          sessionTranscript = "";
+          sessionConfidence = 0;
+          scheduleListenRestart(PROGRAM_BLEED_RESTART_MS);
+          return;
+        }
+        const raw = sessionTranscript.trim();
+        const conf = sessionConfidence;
+        sessionTranscript = "";
+        sessionConfidence = 0;
+        const wasPtt = pushToTalkActive;
+        if (wasPtt) {
+          pushToTalkActive = false;
+          if (holdTalkBtn) holdTalkBtn.textContent = "Hold to talk";
+        }
+
+        const parsed = parseWakeUtterance(raw, { pushToTalk: wasPtt });
+        if (!parsed) {
+          setDuckReason("speech", false);
+          if (wasPtt) setDuckReason("ptt", false);
+          syncAmbientDuck();
+          if (shouldBeListening()) scheduleListenRestart(LISTEN_COOLDOWN_MS);
+          else updateListenBadge("off", "Mic idle");
+          return;
+        }
+        if (parsed.wakeOnly) {
+          setDuckReason("speech", false);
+          syncAmbientDuck();
+          setStatus('Say more after Hey — e.g. “Hey, who’s that?”', "ok");
+          if (shouldBeListening()) scheduleListenRestart(LISTEN_COOLDOWN_MS);
+          return;
+        }
+
+        if (!askInFlight && !ttsSpeaking) {
+          // Keep program ducked into the ask (ptt → ask).
+          setDuckReason("ask", true);
+          setDuckReason("speech", false);
+          setDuckReason("ptt", false);
+          void handleHeardSpeech(parsed.question, conf);
+          return;
+        }
+        setDuckReason("speech", false);
+        setDuckReason("ptt", false);
+        syncAmbientDuck();
+        if (shouldBeListening()) {
+          scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        } else if (ttsSpeaking) {
+          updateListenBadge("off", "Speaking…");
+        } else if (askInFlight) {
+          updateListenBadge("off", "Thinking…");
+        } else {
+          updateListenBadge("off", "Mic idle");
+        }
+      };
     }
 
-    function cleanupListening() {
-      listening = false;
-      micBtn.classList.remove("listening");
+    function ensureRecognition() {
+      if (recognition && sessionCount > 0 && sessionCount % RECREATE_AFTER_SESSIONS === 0) {
+        disposeRecognition();
+        sessionCount = 0;
+      }
+      if (!recognition && SpeechRecognition) {
+        recognition = new SpeechRecognition();
+        wireRecognition(recognition);
+      }
+      return recognition;
     }
 
-    function maybeResumeAfterCancel() {
-      if (pausedForAsk) {
-        player.play().catch(() => {});
-        pausedForAsk = false;
-        resumeBtn.disabled = true;
+    function ensureListening() {
+      const allowPtt = pushToTalkActive && !askInFlight && !ttsSpeaking && !document.hidden;
+      if (!shouldBeListening() && !allowPtt) {
+        if (!titleSelect.value) updateListenBadge("off", "Mic idle");
+        else if (askInFlight) updateListenBadge("off", "Thinking…");
+        else if (ttsSpeaking) updateListenBadge("off", "Speaking…");
+        else if (document.hidden) updateListenBadge("off", "Tab hidden");
+        else if (!listenDesired) updateListenBadge("off", "Mic off");
+        else if (!speechSupported()) updateListenBadge("off", "Mic unavailable");
+        return;
+      }
+      if (listening) {
+        updateListenBadge("on", pushToTalkActive ? "Talk now…" : "Say Hey…");
+        return;
+      }
+      if (!allowStartNow() && !pushToTalkActive) {
+        scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        updateListenBadge("on", "Say Hey… (cool-down)");
+        return;
+      }
+      const rec = ensureRecognition();
+      if (!rec) return;
+      try {
+        recordStart();
+        rec.start();
+      } catch (err) {
+        if (pushToTalkActive || shouldBeListening()) {
+          scheduleListenRestart(200);
+        }
       }
     }
 
-    function speakAnswer(text) {
-      return new Promise((resolve) => {
-        if (!text || !synth) {
-          resolve();
-          return;
-        }
-        synth.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1;
-        utterance.onend = () => resolve();
-        utterance.onerror = () => resolve();
-        synth.speak(utterance);
+    /**
+     * Hold-to-talk: duck program volume immediately, then capture speech (no Hey).
+     */
+    function startPushToTalk() {
+      if (!speechSupported()) {
+        setStatus("Voice unavailable — type questions (Chrome works best).", "error");
+        return;
+      }
+      if (!titleSelect.value) {
+        setStatus("Pick a title first.", "error");
+        return;
+      }
+      if (askInFlight || ttsSpeaking) return;
+
+      pushToTalkActive = true;
+      if (holdTalkBtn) holdTalkBtn.textContent = "Listening…";
+
+      // Warm GainNode graph + duck *before* speech (AirPods-style; no amplitude VAD mic).
+      void ensureSmartDucker().then(() => {
+        setDuckReason("ptt", true);
       });
+      setDuckReason("ptt", true);
+
+      disposeRecognition();
+      recognition = null;
+      sessionCount = 0;
+      lastListenStartMs = 0;
+      ensureListening();
+    }
+
+    function stopPushToTalk() {
+      if (!pushToTalkActive && !listening) return;
+      if (recognition && listening) {
+        try { recognition.stop(); } catch (_) {
+          try { recognition.abort(); } catch (_2) {}
+        }
+      } else {
+        pushToTalkActive = false;
+        setDuckReason("ptt", false);
+        if (holdTalkBtn) holdTalkBtn.textContent = "Hold to talk";
+      }
+    }
+
+    async function handleHeardSpeech(question, conf) {
+      if (conf > 0 && conf < 0.25) {
+        questionText.textContent = question;
+        setStatus("Heard unclear speech — still listening next round.", "ok");
+        setDuckReason("ask", false);
+        setDuckReason("speech", false);
+        setDuckReason("ptt", false);
+        scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        return;
+      }
+      if (isClientNoise(question)) {
+        setStatus("Listening… (ignored filler)", "ok");
+        setDuckReason("ask", false);
+        setDuckReason("speech", false);
+        setDuckReason("ptt", false);
+        scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        return;
+      }
+      capturedTs = player.currentTime || 0;
+      await submitQuestion(question);
+    }
+
+    function setTtsSpeaking(active) {
+      ttsSpeaking = active;
+      if (active) {
+        // Pause STT only — keep SmartAIDucker AudioContext warm (no stream restart).
+        disposeRecognition();
+        setDuckReason("tts", true);
+        setDuckReason("ask", false);
+        updateListenBadge("off", "Speaking…");
+      } else {
+        setDuckReason("tts", false);
+        if (shouldBeListening()) {
+          scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        }
+      }
+    }
+
+    /** One utterance only — no progressive sentence queue (that leaked memory). */
+    function speakOnce(text, readyMessage) {
+      cancelSynth();
+      if (!text || !ttsSupported()) {
+        setStatus(readyMessage, "ok");
+        scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        return;
+      }
+      // Cap spoken length so speech engine doesn't hold huge strings.
+      const words = text.trim().split(/\s+/);
+      const spoken = words.length > 40 ? `${words.slice(0, 40).join(" ")}…` : text.trim();
+
+      setTtsSpeaking(true);
+      setStatus("Answering…", "ok");
+      const utterance = new SpeechSynthesisUtterance(spoken);
+      applyUtteranceVoice(utterance);
+      // TTS path uses SpeechSynthesisUtterance.volume (no Web Audio node for synth).
+      // Program GainNode ducks while AI speaks — does not cancel speech.
+      utterance.volume = 1;
+      activeUtterance = utterance;
+      const finish = () => {
+        if (activeUtterance === utterance) activeUtterance = null;
+        setTtsSpeaking(false);
+        if (!askInFlight) setStatus(readyMessage, "ok");
+      };
+      utterance.onend = finish;
+      utterance.onerror = finish;
+      try {
+        synth.speak(utterance);
+      } catch (_) {
+        finish();
+      }
+    }
+
+    async function streamAsk(titleId, question) {
+      if (activeStreamAbort) {
+        try { activeStreamAbort.abort(); } catch (_) {}
+      }
+      activeStreamAbort = new AbortController();
+      if (activeSpeaker) {
+        try { activeSpeaker.cancel(); } catch (_) {}
+        activeSpeaker = null;
+      }
+      cancelSynth();
+
+      const response = await fetch("/ask/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({
+          title_id: titleId,
+          current_ts: capturedTs,
+          question,
+          user_id: USER_ID,
+          persona_id: currentPersonaId(),
+          companion_gender: currentCompanionGender(),
+        }),
+        signal: activeStreamAbort.signal,
+      });
+      if (!response.ok) {
+        let detail = "Ask stream failed";
+        try { const errBody = await response.json(); detail = errBody.detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      if (!response.body) throw new Error("Streaming not supported by browser");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let answer = "";
+      let donePayload = null;
+      const readyMsg = 'Listening for “Hey…”, then your question.';
+      answerText.textContent = "";
+      let unlocked = false;
+
+      const unlockOnce = () => {
+        if (unlocked) return;
+        unlocked = true;
+        releaseControls();
+      };
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // Cap stuck buffer growth if client lags.
+          if (buffer.length > 250_000) buffer = buffer.slice(-100_000);
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() || "";
+          for (const chunk of chunks) {
+            const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+            if (!line) continue;
+            let event;
+            try { event = JSON.parse(line.slice(6)); } catch (_) { continue; }
+            if (event.type === "status" && event.message) startThinkingStatus(event.message);
+            else if (event.type === "tool_start" && event.message) startThinkingStatus(event.message);
+            else if (event.type === "token" && event.text) {
+              stopThinkingStatus();
+              answer += event.text;
+              // Cap DOM answer growth for safety.
+              if (answer.length > 4000) answer = answer.slice(0, 4000) + "…";
+              answerText.textContent = answer;
+              unlockOnce();
+            } else if (event.type === "intent" && event.intent) {
+              if (event.intent === "FILLER") startThinkingStatus("Skipping noise…");
+              else if (event.intent === "NAVIGATE") startThinkingStatus("Jump requested…");
+              else if (event.intent === "SOCIAL") startThinkingStatus("Quick chat…");
+              else if (event.intent === "JOKE") startThinkingStatus("Cooking a one-liner…");
+              else if (event.intent === "PREDICTION") startThinkingStatus("Logging your guess…");
+            } else if (event.type === "done") {
+              stopThinkingStatus();
+              answer = event.answer != null ? event.answer : answer;
+              donePayload = event;
+              const shouldSpeak = event.speak !== false && Boolean((answer || "").trim());
+              if (!(answer || "").trim()) {
+                answerText.textContent = "—";
+                const reason = String(event.escalation_reason || event.intent || "");
+                setStatus(
+                  reason.includes("FILLER") || reason.includes("gate:ignore")
+                    ? "Skipped unclear speech — still listening."
+                    : event.navigate || reason.includes("NAVIGATE")
+                      ? "Handing off navigate…"
+                      : "No answer — still listening.",
+                  "ok"
+                );
+              } else {
+                answerText.textContent = answer;
+              }
+              unlockOnce();
+              if (shouldSpeak) speakOnce(answer, readyMsg);
+              else setStatus(readyMsg, "ok");
+              const intent = String(donePayload.intent || donePayload.escalation_reason || "");
+              if (intent.includes("PREDICTION")) {
+                void refreshPredictionLog();
+              }
+            } else if (event.type === "error") {
+              throw new Error(event.detail || event.message || "Ask failed");
+            }
+          }
+        }
+      } finally {
+        try { reader.releaseLock(); } catch (_) {}
+        activeStreamAbort = null;
+        buffer = "";
+      }
+      if (!donePayload) throw new Error("Stream ended without a response");
+      unlockOnce();
+      return { answer, done: donePayload };
+    }
+
+    async function runNavigate(titleId, question) {
+      const response = await fetch("/navigate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title_id: titleId,
+          current_ts: capturedTs,
+          question,
+          user_id: USER_ID,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Navigate request failed");
+      stopThinkingStatus();
+      answerText.textContent = data.answer || "—";
+      if (data.seek_to_ts != null) {
+        applySeek(data.seek_to_ts);
+        releaseControls();
+        setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
+        speakOnce(data.answer, 'Listening for “Hey…”, then your question.');
+        return;
+      }
+      releaseControls();
+      speakOnce(data.answer, 'Listening for “Hey…”, then your question.');
+    }
+
+    function renderPredictionLog(rows) {
+      if (!predictionLog) return;
+      predictionLog.innerHTML = "";
+      if (!rows || !rows.length) {
+        const empty = document.createElement("li");
+        empty.id = "predictionLogEmpty";
+        empty.textContent = "None yet — try “I bet she’s lying.”";
+        predictionLog.appendChild(empty);
+        return;
+      }
+      for (const row of rows) {
+        const li = document.createElement("li");
+        const guess = row.guess_text || "…";
+        const status = row.resolved
+          ? row.correct === true
+            ? "✓ resolved"
+            : row.correct === false
+              ? "✗ resolved"
+              : "resolved"
+          : "pending";
+        li.textContent = `${guess} — ${status}`;
+        predictionLog.appendChild(li);
+      }
+    }
+
+    async function refreshPredictionLog() {
+      const titleId = titleSelect.value;
+      if (!titleId || !predictionLog) return;
+      try {
+        const response = await fetch("/predictions/list", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title_id: titleId,
+            user_id: USER_ID,
+            session_id: predictionSessionId(titleId),
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        renderPredictionLog(data.predictions || []);
+      } catch (_) { /* ignore */ }
+    }
+
+    async function pollPendingPredictions() {
+      const titleId = titleSelect.value;
+      if (!titleId || askInFlight) return;
+      const currentTs = player.currentTime || 0;
+      try {
+        const response = await fetch("/predictions/pending", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title_id: titleId,
+            user_id: USER_ID,
+            session_id: predictionSessionId(titleId),
+            current_ts: currentTs,
+            title_ended: titleEndedFlag,
+            persona_id: currentPersonaId(),
+            mark_resolved: true,
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        const reveals = data.reveals || [];
+        for (const rev of reveals) {
+          if (predictionRevealedIds.has(rev.prediction_id)) continue;
+          predictionRevealedIds.add(rev.prediction_id);
+          const msg = rev.message || `Time to revisit: ${rev.guess_text || "your guess"}`;
+          answerText.textContent = msg;
+          speakOnce(msg, "Still watching with you.");
+        }
+        if (reveals.length) void refreshPredictionLog();
+      } catch (_) { /* ignore */ }
+    }
+
+    async function pollTriviaTick() {
+      if (!triviaEnabled() || askInFlight) return;
+      const titleId = titleSelect.value;
+      if (!titleId) return;
+      const currentTs = player.currentTime || 0;
+      try {
+        const response = await fetch("/trivia/tick", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title_id: titleId,
+            current_ts: currentTs,
+            enabled: true,
+            persona_id: currentPersonaId(),
+            surfaced_ids: triviaSurfacedIds,
+            last_surfaced_ts: triviaLastSurfacedTs,
+            last_ask_ts: triviaLastAskTs,
+            count: triviaCount,
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        const fact = data.trivia;
+        if (!fact) return;
+        triviaSurfacedIds = [...triviaSurfacedIds, fact.trivia_id];
+        triviaLastSurfacedTs = currentTs;
+        triviaCount += 1;
+        const msg = fact.message || fact.fact_text;
+        answerText.textContent = msg;
+        speakOnce(msg, "Still watching with you.");
+      } catch (_) { /* ignore */ }
+    }
+
+    function resetTriviaSessionState() {
+      triviaSurfacedIds = [];
+      triviaLastSurfacedTs = null;
+      triviaLastAskTs = null;
+      triviaCount = 0;
+      predictionRevealedIds = new Set();
+      titleEndedFlag = false;
+    }
+
+    function startFeaturePolls() {
+      if (predictionPollTimer) clearInterval(predictionPollTimer);
+      if (triviaTickTimer) clearInterval(triviaTickTimer);
+      predictionPollTimer = setInterval(() => { void pollPendingPredictions(); }, 8000);
+      triviaTickTimer = setInterval(() => { void pollTriviaTick(); }, 12000);
+    }
+
+    function stopFeaturePolls() {
+      if (predictionPollTimer) {
+        clearInterval(predictionPollTimer);
+        predictionPollTimer = null;
+      }
+      if (triviaTickTimer) {
+        clearInterval(triviaTickTimer);
+        triviaTickTimer = null;
+      }
     }
 
     async function submitQuestion(question) {
       const titleId = titleSelect.value;
       if (!titleId || askInFlight) return;
+      triviaLastAskTs = player.currentTime || capturedTs || 0;
+      void ensureSmartDucker();
+      if (isClientNoise(question)) {
+        questionText.textContent = question || "—";
+        answerText.textContent = "—";
+        setStatus("Listening… (ignored filler)", "ok");
+        setDuckReason("ask", false);
+        setDuckReason("speech", false);
+        scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        return;
+      }
 
-      let navigate = isNavigationQuestion(question);
+      const navigate = isNavigationQuestion(question);
       askInFlight = true;
-      micBtn.disabled = true;
+      setDuckReason("ask", true);
+      setDuckReason("speech", false);
+      disposeRecognition();
+      updateListenBadge("off", "Thinking…");
+      sendBtn.disabled = true;
+      questionInput.disabled = true;
       questionText.textContent = question;
       answerText.textContent = "…";
-      setStatus(navigate ? "Finding that moment…" : "Thinking…", "thinking");
+
+      const clientSeek = navigate ? parseClientSeekTimestamp(question) : null;
+      if (clientSeek != null) {
+        applySeek(clientSeek);
+        answerText.textContent = `Jumping to ${_formatTs(clientSeek)}…`;
+        startThinkingStatus(`Jumping to ${_formatTs(clientSeek)}`);
+      } else {
+        startThinkingStatus(navigate ? "Finding that moment…" : "Thinking…");
+      }
 
       try {
-        const endpoint = navigate ? "/navigate" : "/ask";
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title_id: titleId,
-            current_ts: capturedTs,
-            question,
-            user_id: USER_ID,
-          }),
-        });
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.detail || `${navigate ? "Navigate" : "Ask"} request failed`);
-        }
-        answerText.textContent = data.answer;
-        if (navigate && data.seek_to_ts != null) {
-          applySeek(data.seek_to_ts);
-          setStatus(`Jumped to ${_formatTs(data.seek_to_ts)}`, "ok");
-          await speakAnswer(data.answer);
-          setStatus("Ready — hold Space or mic.", "ok");
+        if (navigate) {
+          await runNavigate(titleId, question);
           return;
         }
-        setStatus("Speaking answer…", "ok");
-        await speakAnswer(data.answer);
-        setStatus("Ready — hold Space or mic to ask again.", "ok");
-      } catch (err) {
-        answerText.textContent = "—";
-        setStatus(err.message || "Something went wrong.", "error");
-      } finally {
-        askInFlight = false;
-        micBtn.disabled = !titleSelect.value;
-        if (pausedForAsk && !navigate) {
-          player.play().catch(() => {});
-          pausedForAsk = false;
-          resumeBtn.disabled = true;
+
+        const result = await streamAsk(titleId, question);
+        // Merged-tag path may discover navigate intent server-side.
+        if (result.done && (result.done.navigate || result.done.intent === "NAVIGATE")) {
+          await runNavigate(titleId, question);
+        } else {
+          releaseControls();
         }
+      } catch (err) {
+        stopThinkingStatus();
+        answerText.textContent = "—";
+        setDuckReason("ask", false);
+        setDuckReason("tts", false);
+        if (err && err.name === "AbortError") {
+          setStatus("Request cancelled.", "ok");
+        } else {
+          setStatus(err.message || "Something went wrong.", "error");
+        }
+        releaseControls();
       }
+    }
+
+    function submitTypedQuestion() {
+      const question = (questionInput.value || "").trim();
+      if (!question || askInFlight) return;
+      capturedTs = player.currentTime || 0;
+      questionInput.value = "";
+      void submitQuestion(question);
     }
 
     function _formatTs(seconds) {
@@ -381,40 +1565,62 @@
       return `${minutes}:${String(secs).padStart(2, "0")}`;
     }
 
-    function beginAsk() {
-      if (askInFlight || listening || !titleSelect.value) return;
-      if (!speechSupported()) {
-        setStatus("Speech recognition not supported — use Chrome.", "error");
-        return;
-      }
-
-      capturedTs = player.currentTime || 0;
-      if (!player.paused) {
-        player.pause();
-        pausedForAsk = true;
-        resumeBtn.disabled = false;
-      } else {
-        pausedForAsk = false;
-      }
-
-      finalTranscript = "";
-      questionText.textContent = "…";
-      answerText.textContent = "—";
-
-      try {
-        recognition.start();
-      } catch (err) {
-        setStatus("Could not start microphone — check permissions.", "error");
-        maybeResumeAfterCancel();
-      }
+    function autoListenEnabled() {
+      return Boolean(autoListenMic && autoListenMic.checked);
     }
 
-    function endAsk() {
-      if (!listening || !recognition) return;
+    function persistAutoListenPref() {
       try {
-        recognition.stop();
-      } catch (_) {
-        cleanupListening();
+        localStorage.setItem(LS_AUTO_LISTEN, autoListenEnabled() ? "1" : "0");
+      } catch (_) {}
+    }
+
+    function enableAmbientMic() {
+      if (!autoListenEnabled()) {
+        disableAmbientMic();
+        updateListenBadge("off", "Mic off");
+        return;
+      }
+      if (!speechSupported()) {
+        listenDesired = false;
+        updateListenBadge("off", "Mic unavailable");
+        setStatus("Voice unavailable — type questions (Chrome works best).", "ok");
+        return;
+      }
+      listenDesired = true;
+      // Warm program GainNode only — ducking is state-driven (PTT / STT / TTS hooks).
+      void ensureSmartDucker();
+      ensureListening();
+    }
+
+    function disableAmbientMic() {
+      listenDesired = false;
+      sessionTranscript = "";
+      userListenUntilMs = 0;
+      quietingProgram = false;
+      disposeRecognition();
+      setDuckReason("ambient", false);
+      setDuckReason("speech", false);
+      updateListenBadge("off", autoListenEnabled() ? "Mic idle" : "Mic off");
+    }
+
+    function applyAutoListenToggle() {
+      persistAutoListenPref();
+      if (!titleSelect.value) {
+        disableAmbientMic();
+        return;
+      }
+      if (autoListenEnabled()) {
+        enableAmbientMic();
+        setStatus(
+          speechSupported()
+            ? "Auto listen on — say “Hey…” + your question, or type below."
+            : "Mic unavailable — type questions below.",
+          "ok"
+        );
+      } else {
+        disableAmbientMic();
+        setStatus("Auto listen off — type questions to measure latency / quality.", "ok");
       }
     }
 
@@ -438,12 +1644,8 @@
           titleSelect.appendChild(option);
         }
         titleSelect.disabled = false;
-        micBtn.disabled = !speechSupported();
-        if (!speechSupported()) {
-          setStatus("Use Chrome for voice input.", "error");
-        } else {
-          setStatus("Ready — pick a title and press play.", "ok");
-        }
+        sendBtn.disabled = false;
+        questionInput.disabled = false;
         onTitleChange();
       } catch (err) {
         titleSelect.innerHTML = '<option value="">Failed to load titles</option>';
@@ -453,74 +1655,133 @@
 
     function onTitleChange() {
       const titleId = titleSelect.value;
-      if (!titleId) {
+      // Drop prior video decode buffers when switching titles.
+      try {
+        player.pause();
         player.removeAttribute("src");
         player.load();
-        micBtn.disabled = true;
+      } catch (_) {}
+      resetTriviaSessionState();
+      if (!titleId) {
+        sendBtn.disabled = true;
+        questionInput.disabled = true;
+        disableAmbientMic();
+        renderPredictionLog([]);
         return;
       }
+      player.preload = "metadata";
       player.src = `/video/${encodeURIComponent(titleId)}`;
       player.load();
-      micBtn.disabled = !speechSupported();
-      setStatus(`Loaded ${titleId}. Press play, then hold Space or mic to ask.`, "ok");
+      sendBtn.disabled = false;
+      questionInput.disabled = false;
+      void refreshPredictionLog();
+      if (autoListenEnabled()) {
+        enableAmbientMic();
+        setStatus(
+          speechSupported()
+            ? `Loaded ${titleId}. Play, then say “Hey…” + your question.`
+            : `Loaded ${titleId}. Type questions below.`,
+          "ok"
+        );
+      } else {
+        disableAmbientMic();
+        setStatus(
+          `Loaded ${titleId}. Auto listen off — type a question (or enable Auto listen).`,
+          "ok"
+        );
+      }
     }
 
-    micBtn.addEventListener("mousedown", (event) => {
-      event.preventDefault();
-      micHeld = true;
-      beginAsk();
+    sendBtn.addEventListener("click", () => submitTypedQuestion());
+    questionInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); submitTypedQuestion(); }
     });
-    micBtn.addEventListener("mouseup", () => {
-      micHeld = false;
-      endAsk();
-    });
-    micBtn.addEventListener("mouseleave", () => {
-      if (micHeld) {
-        micHeld = false;
-        endAsk();
-      }
-    });
-    micBtn.addEventListener("touchstart", (event) => {
-      event.preventDefault();
-      micHeld = true;
-      beginAsk();
-    }, { passive: false });
-    micBtn.addEventListener("touchend", (event) => {
-      event.preventDefault();
-      micHeld = false;
-      endAsk();
-    });
-
-    window.addEventListener("keydown", (event) => {
-      if (event.code !== "Space" || event.repeat) return;
-      const tag = (event.target && event.target.tagName) || "";
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      event.preventDefault();
-      if (!spaceHeld) {
-        spaceHeld = true;
-        beginAsk();
-      }
-    });
-
-    window.addEventListener("keyup", (event) => {
-      if (event.code !== "Space") return;
-      event.preventDefault();
-      spaceHeld = false;
-      endAsk();
-    });
-
-    resumeBtn.addEventListener("click", () => {
-      player.play().catch(() => {});
-      pausedForAsk = false;
-      resumeBtn.disabled = true;
-      synth.cancel();
-      setStatus("Playback resumed.", "ok");
-    });
-
     titleSelect.addEventListener("change", onTitleChange);
+    if (autoListenMic) {
+      autoListenMic.addEventListener("change", applyAutoListenToggle);
+    }
+    if (triviaToggle) {
+      triviaToggle.addEventListener("change", () => {
+        persistTriviaPref();
+        if (!triviaEnabled()) {
+          setStatus("Occasional trivia off.", "ok");
+        } else {
+          setStatus("Occasional trivia on — sparse production facts only.", "ok");
+        }
+      });
+    }
+    player.addEventListener("ended", () => {
+      titleEndedFlag = true;
+      void pollPendingPredictions();
+    });
+    if (holdTalkBtn) {
+      const endPtt = (event) => {
+        if (event) event.preventDefault();
+        stopPushToTalk();
+      };
+      const beginPtt = (event) => {
+        if (event) event.preventDefault();
+        startPushToTalk();
+      };
+      holdTalkBtn.addEventListener("pointerdown", beginPtt);
+      holdTalkBtn.addEventListener("pointerup", endPtt);
+      holdTalkBtn.addEventListener("pointerleave", endPtt);
+      holdTalkBtn.addEventListener("pointercancel", endPtt);
+      holdTalkBtn.addEventListener("keydown", (event) => {
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          startPushToTalk();
+        }
+      });
+      holdTalkBtn.addEventListener("keyup", (event) => {
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          stopPushToTalk();
+        }
+      });
+    }
 
-    recognition = setupRecognition();
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        disposeRecognition();
+        cancelSynth();
+        if (activeStreamAbort) {
+          try { activeStreamAbort.abort(); } catch (_) {}
+          activeStreamAbort = null;
+        }
+        // Keep SmartAIDucker AudioContext alive across tab hide (no graph rebuild on return).
+        if (smartDucker && smartDucker.ctx && smartDucker.ctx.state === "running") {
+          try { smartDucker.ctx.suspend(); } catch (_) {}
+        }
+        updateListenBadge("off", "Tab hidden");
+      } else {
+        if (smartDucker && smartDucker.ctx && smartDucker.ctx.state === "suspended") {
+          try { void smartDucker.ctx.resume(); } catch (_) {}
+        }
+        if (shouldBeListening()) {
+          scheduleListenRestart(LISTEN_COOLDOWN_MS);
+        }
+      }
+    });
+
+    window.addEventListener("pagehide", () => {
+      disposeRecognition();
+      cancelSynth();
+      if (activeStreamAbort) {
+        try { activeStreamAbort.abort(); } catch (_) {}
+      }
+      if (smartDucker) {
+        try { smartDucker.destroy(); } catch (_) {}
+        smartDucker = null;
+        smartDuckerPromise = null;
+      }
+    });
+
+    // Prefer metadata only; avoids aggressive full-file buffering where possible.
+    player.preload = "metadata";
+
     loadTitles();
+    startFeaturePolls();
   </script>
 </body>
 </html>

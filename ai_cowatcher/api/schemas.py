@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+CompanionGender = Literal["male", "female", "neutral"]
 
 
 class IngestRequest(BaseModel):
@@ -36,6 +40,10 @@ class AskRequest(BaseModel):
     current_ts: float = Field(..., ge=0.0)
     question: str = Field(..., min_length=1)
     user_id: str = Field(..., min_length=1, max_length=128)
+    # Companion personality (tone). Defaults to Settings.DEFAULT_PERSONA_ID server-side.
+    persona_id: str | None = Field(default=None, max_length=64)
+    # Preferred TTS / delivery gender (client may also apply voice selection local-only).
+    companion_gender: CompanionGender | None = None
 
 
 class AskResponse(BaseModel):
@@ -46,6 +54,8 @@ class AskResponse(BaseModel):
     model_tier: str
     model_name: str
     escalation_reason: str
+    speak: bool = True
+    skip_memory: bool = False
 
 
 class NavigateRequest(BaseModel):

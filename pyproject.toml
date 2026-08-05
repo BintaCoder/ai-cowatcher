@@ -17,7 +17,7 @@ dependencies = [
     "faster-whisper==1.1.1",
     "insightface==0.7.3",
     "onnxruntime==1.24.4",
-    "litellm==1.65.4",
+    "litellm==1.80.10",
     "FlagEmbedding==1.3.4",
     "transformers==4.46.3",
     "qdrant-client==1.13.3",
@@ -54,13 +54,16 @@ cowatcher-ingest = "ai_cowatcher.ingestion.cli:main"
 cowatcher-ingest-worker = "ai_cowatcher.ingestion.worker_cli:main"
 cowatcher-knowledge = "ai_cowatcher.ingestion.knowledge_cli:main"
 cowatcher-metrics-lite = "ai_cowatcher.observability.summarize_logs:main"
+cowatcher-warm-qa-cache = "ai_cowatcher.qa.warm_cache:main"
+cowatcher-bench-ask = "ai_cowatcher.bench.ask_runner:main"
+cowatcher-bench-reimport = "ai_cowatcher.bench.reimport:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ai_cowatcher*"]
 
 [tool.setuptools.package-data]
-ai_cowatcher = ["web/*.html"]
+ai_cowatcher = ["web/*.html", "personas/*.json"]
 
 [tool.ruff]
 line-length = 100

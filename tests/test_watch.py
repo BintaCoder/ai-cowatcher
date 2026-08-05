@@ -35,7 +35,8 @@ def test_parse_range_header_explicit():
 def watch_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"\x00" * 128)
-    title_id = f"demo-web-{uuid.uuid4().hex[:8]}"
+    # Avoid nav-/demo-web* ephemeral prefixes filtered from the pilot /titles list.
+    title_id = f"watch-test-{uuid.uuid4().hex[:8]}"
 
     settings = Settings(MOCK_MODE=True)
     engine = create_db_engine(settings=settings)
@@ -73,6 +74,26 @@ def test_watch_page_served(watch_client):
     assert response.status_code == 200
     assert "Co-watcher" in response.text
     assert "SpeechRecognition" in response.text
+    assert "parseClientSeekTimestamp" in response.text
+    assert "speakOnce" in response.text
+    assert "duckWhileTalking" in response.text
+    assert "setDuckReason" in response.text
+    assert "ensureSmartDucker" in response.text
+    assert "questionInput" in response.text
+    assert "/ask/stream" in response.text
+    assert "streamAsk" in response.text
+    assert "/watch/smart_ai_ducker.js" in response.text
+    assert "conversation_ducking.js" not in response.text
+    assert "processVadRms" not in response.text
+    # Auto-listen remains opt-in for latency isolation tests.
+    assert "cowatcher.auto_listen_mic" in response.text
+    assert 'id="holdTalkBtn"' in response.text
+    assert "startPushToTalk" in response.text
+    assert 'id="triviaToggle"' in response.text
+    assert "cowatcher.trivia_opt_in" in response.text
+    assert 'id="predictionLog"' in response.text
+    assert "/predictions/pending" in response.text
+    assert "/trivia/tick" in response.text
 
 
 def test_titles_endpoint_lists_completed(watch_client):

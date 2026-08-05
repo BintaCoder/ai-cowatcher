@@ -2,22 +2,36 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+import asyncio
+
+from fastapi import APIRouter, Request
 
 from ai_cowatcher.api.schemas import NavigateRequest, NavigateResponseSchema
-from ai_cowatcher.realtime.navigation_session import build_navigation_session
+from ai_cowatcher.realtime.navigation_session import NavigationSession, build_navigation_session
 
 router = APIRouter(tags=["navigate"])
 
 
+def _get_navigation_session(request: Request) -> NavigationSession:
+    session = getattr(request.app.state, "navigation_session", None)
+    if session is not None:
+        return session
+    return build_navigation_session(getattr(request.app.state, "settings", None))
+
+
 @router.post("/navigate", response_model=NavigateResponseSchema)
-async def navigate(request: NavigateRequest) -> NavigateResponseSchema:
-    session = build_navigation_session()
-    result = session.navigate(
-        title_id=request.title_id,
-        question=request.question,
-        current_ts=request.current_ts,
-        user_id=request.user_id,
+async def navigate(
+    body: NavigateRequest,
+    http_request: Request,
+) -> NavigateResponseSchema:
+    session = _get_navigation_session(http_request)
+    # Resolver/embed/Qdrant/TMDB are sync — run off the event loop.
+    result = await asyncio.to_thread(
+        session.navigate,
+        title_id=body.title_id,
+        question=body.question,
+        current_ts=body.current_ts,
+        user_id=body.user_id,
     )
     return NavigateResponseSchema(
         answer=result.answer,

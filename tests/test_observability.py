@@ -27,7 +27,13 @@ SPOILER_QUESTION = "Who is the killer?"
 
 @pytest.fixture
 def observability_settings() -> Settings:
-    return Settings(MOCK_MODE=True, QDRANT_COLLECTION="test_observability")
+    # Non-merged path so tier escalation is exercised in KPI rollups.
+    return Settings(
+        MOCK_MODE=True,
+        PILOT_LOW_LATENCY=False,
+        UTTERANCE_GATE_STRATEGY="heuristic",
+        QDRANT_COLLECTION=f"test_observability_{uuid.uuid4().hex[:8]}",
+    )
 
 
 @pytest.fixture
@@ -111,6 +117,7 @@ def test_ask_emits_structured_json_log(
         json.loads(record.message)
         for record in caplog.records
         if record.name == "ai_cowatcher.ask"
+        and '"event":"ask_request"' in record.message
     ]
     assert len(ask_records) == 1
     payload = ask_records[0]

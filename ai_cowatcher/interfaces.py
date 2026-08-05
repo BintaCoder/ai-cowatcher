@@ -16,6 +16,17 @@ class AudioExtractor(Protocol):
     def extract_audio(self, video_path: str, output_path: str) -> str:
         ...
 
+    def extract_audio_window(
+        self,
+        source_path: str,
+        output_path: str,
+        *,
+        start_ts: float,
+        end_ts: float,
+    ) -> str:
+        """Extract a mono 16kHz PCM WAV window from video or a title-level WAV."""
+        ...
+
 
 class Transcriber(Protocol):
     def transcribe_window(self, audio_path: str, start_ts: float, end_ts: float) -> str:

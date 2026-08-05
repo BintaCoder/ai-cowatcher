@@ -25,6 +25,8 @@ from ai_cowatcher.storage.qdrant_store import QdrantSceneStore
 def tier_settings() -> Settings:
     return Settings(
         MOCK_MODE=True,
+        PILOT_LOW_LATENCY=False,
+        UTTERANCE_GATE_STRATEGY="heuristic",
         QDRANT_COLLECTION="test_tier_routing",
         LLM_ESCALATION_STRATEGY="heuristic",
         LLM_ESCALATION_MIN_CHARS=80,
@@ -101,7 +103,13 @@ def test_conversation_agent_uses_escalated_model_and_records_telemetry(
     assert result.model_name == "mock-llm-escalated"
     assert conversation_tier_counts()["escalated"] == 1
     assert any('"event":"ask_request"' in record.message for record in caplog.records)
-    payload = json.loads(caplog.records[-1].message)
+    ask_logs = [
+        json.loads(record.message)
+        for record in caplog.records
+        if '"event":"ask_request"' in record.message
+    ]
+    assert ask_logs
+    payload = ask_logs[-1]
     assert payload["model_tier"] == "escalated"
     assert payload["title_id"] == "demo"
     assert "latency_ms" in payload

@@ -9,7 +9,9 @@ SCENE_LOOKUP_TOOL = {
         "description": (
             "Search ingested scene events for a title up to the viewer's current playback "
             "position. Returns matching scenes in chronological order. "
-            "Only scenes that have already aired are visible."
+            "Only scenes that have already aired are visible. "
+            "PREFERRED first tool for 'who is on screen', 'what just happened', and "
+            "visual/plot questions about the current moment."
         ),
         "parameters": {
             "type": "object",
@@ -31,8 +33,8 @@ CAST_LOOKUP_TOOL = {
         "description": (
             "Look up the public cast/actor list for the title the viewer is watching. "
             "Use this when the viewer asks who an actor is, who plays a character, or "
-            "for the names of the actors. Cast lists are public information and are not "
-            "plot spoilers. Returns actors and the characters they play."
+            "for the names of the actors. Cast is extracted at ingest and served from "
+            "cache (not a live web call). Cast lists are public and are not plot spoilers."
         ),
         "parameters": {
             "type": "object",
@@ -61,12 +63,10 @@ CHARACTER_LOOKUP_TOOL = {
         "description": (
             "Look up in-story character intelligence for the title the viewer is "
             "watching, restricted to what has aired up to their current position. "
-            "Use this for questions about who a person on screen is, whether the "
-            "viewer has seen them before, how two characters know each other, or "
-            "what their relationship is so far. Results are spoiler-safe: only "
-            "appearances and relationships already revealed by the current timestamp "
-            "are returned, so future reveals are never leaked. Returns the resolved "
-            "character, their prior appearances, and known relationships."
+            "Use for continuity questions (have I seen them before?, relationships, "
+            "how they know each other). Prefer scene_lookup first for 'who is on "
+            "screen / that guy' visual ID — captions and dialog usually answer that "
+            "faster without this tool. Results are spoiler-safe."
         ),
         "parameters": {
             "type": "object",

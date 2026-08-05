@@ -1,0 +1,18 @@
+apiVersion: 1
+
+datasources:
+  - name: Postgres
+    type: postgres
+    uid: cowatcher-postgres
+    access: proxy
+    url: postgres:5432
+    user: cowatcher
+    isDefault: false
+    editable: false
+    jsonData:
+      database: cowatcher
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: cowatcher
