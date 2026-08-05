@@ -199,3 +199,149 @@ def test_resolve_title_id_by_display_name_and_slug() -> None:
         assert resolve_title_id(session, "Friends Ross") == "friends_ross"
         assert resolve_title_id(session, "friends_ross") == "friends_ross"
         assert resolve_title_id(session, "FRIENDS ROSS") == "friends_ross"
+
+
+def test_row_from_jsonl_preserves_created_at() -> None:
+    from datetime import datetime, timezone
+
+    from ai_cowatcher.bench.store import row_from_jsonl_dict
+
+    row = row_from_jsonl_dict(
+        {
+            "run_id": "abc123",
+            "title_id": "friends_ross",
+            "question_id": "q01",
+            "question": "What just happened?",
+            "current_ts": 12.5,
+            "answer": "A joke beat.",
+            "latency_ms": 900.0,
+            "cache_source": "miss",
+            "model_name": "gemini/x",
+            "model_tier": "fast",
+            "persona_id": "witty_friend",
+            "companion_gender": "female",
+            "status": "ok",
+            "created_at": "2026-08-04T10:28:25.703427+00:00",
+        }
+    )
+    assert row.run_id == "abc123"
+    assert row.persona_id == "witty_friend"
+    assert row.created_at == datetime(2026, 8, 4, 10, 28, 25, 703427, tzinfo=timezone.utc)
+
+
+def test_reimport_jsonl_skips_existing_run(tmp_path: Path) -> None:
+    from sqlalchemy import create_engine, event, func, select
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from ai_cowatcher.bench.store import (
+        BenchResultRow,
+        insert_bench_result,
+        reimport_jsonl_file,
+    )
+    from ai_cowatcher.db.base import Base
+    from ai_cowatcher.db.models import BenchAskResult
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _pragma(dbapi_connection, _):
+        cur = dbapi_connection.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    Base.metadata.create_all(bind=engine)
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    path = tmp_path / "run1.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "title_id": "t",
+                "question_id": "q01",
+                "question": "Hi",
+                "current_ts": 1.0,
+                "answer": "Hello",
+                "latency_ms": 10.0,
+                "cache_source": "free",
+                "model_name": "gate:free",
+                "model_tier": "gate",
+                "persona_id": "easygoing_friend",
+                "companion_gender": "neutral",
+                "status": "ok",
+                "created_at": "2026-08-04T12:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with factory() as session:
+        n, status = reimport_jsonl_file(session, path)
+        assert status == "ok" and n == 1
+        n2, status2 = reimport_jsonl_file(session, path)
+        assert status2 == "skipped" and n2 == 0
+        count = session.scalar(select(func.count()).select_from(BenchAskResult))
+        assert count == 1
+
+
+def test_reimport_jsonl_dir(tmp_path: Path) -> None:
+    from sqlalchemy import create_engine, event, func, select
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from ai_cowatcher.bench.store import reimport_jsonl_dir
+    from ai_cowatcher.db.base import Base
+    from ai_cowatcher.db.models import BenchAskResult
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _pragma(dbapi_connection, _):
+        cur = dbapi_connection.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    Base.metadata.create_all(bind=engine)
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    for rid in ("aaa", "bbb"):
+        (tmp_path / f"{rid}.jsonl").write_text(
+            json.dumps(
+                {
+                    "run_id": rid,
+                    "title_id": "t",
+                    "question_id": "q01",
+                    "question": "Q",
+                    "current_ts": 1.0,
+                    "answer": "A",
+                    "latency_ms": 5.0,
+                    "cache_source": "miss",
+                    "model_name": "m",
+                    "model_tier": "fast",
+                    "status": "ok",
+                    "created_at": "2026-08-04T12:00:00+00:00",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    with factory() as session:
+        stats = reimport_jsonl_dir(session, tmp_path)
+        assert stats["files"] == 2
+        assert stats["inserted"] == 2
+        assert stats["skipped"] == 0
+        stats2 = reimport_jsonl_dir(session, tmp_path)
+        assert stats2["skipped"] == 2
+        assert stats2["inserted"] == 0
+        assert session.scalar(select(func.count()).select_from(BenchAskResult)) == 2

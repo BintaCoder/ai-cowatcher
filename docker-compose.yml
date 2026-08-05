@@ -132,8 +132,14 @@ services:
     container_name: cowatcher-prometheus
     ports:
       - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -149,6 +155,7 @@ services:
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
 
@@ -160,3 +167,5 @@ volumes:
   minio_data:
   rabbitmq_data:
   kafka_data:
+  prometheus_data:
+  grafana_data:

@@ -4,6 +4,35 @@ Automated `/ask` latency + QA-cache sampling for pilot titles (default title nam
 **Friends Ross**, resolved to ingest id `friends_ross`).
 Answers land in **Postgres** for Grafana tables; bonus JSONL under `benchmarks/results/`.
 
+## Persistence (long-term)
+
+Rows in `bench_ask_result` have **no app TTL** — they stay until the Postgres volume
+is deleted. Grafana used to hide anything older than **6 hours**; panels now default
+to the **last 30 days**, plus a **Run history** table so older `run_id`s stay visible.
+
+| Store | Durability | Notes |
+|-------|------------|-------|
+| Postgres `bench_ask_result` | Named volume `postgres_data` | Primary; Grafana “Ask Bench” |
+| `benchmarks/results/<run_id>.jsonl` | On disk / git | Archive + reimport source |
+| Prometheus `/ask` series | Named volume `prometheus_data` (30d retention) | Latency charts only — not Q&A text |
+
+**Do not** run `docker compose down -v` unless you intend to wipe history.
+`make down` keeps volumes.
+
+### Restore yesterday’s runs into Grafana
+
+JSONL from prior benches lives under `benchmarks/results/`. After Postgres is up:
+
+```bash
+make up-core
+make bench-reimport
+# or one file: make bench-reimport FILE=benchmarks/results/26b168323136.jsonl
+docker compose restart grafana   # pick up dashboard JSON changes
+```
+
+Reimport is idempotent (skips `run_id`s already in Postgres). Use `FORCE=1` only if you
+want duplicate inserts.
+
 ## Product rules
 
 1. **Real Gemini** — run with `MOCK_MODE=false`. The runner refuses mock mode unless you pass `--allow-mock` (smoke only).
@@ -128,9 +157,13 @@ signatures when `PILOT_LOW_LATENCY=true`.
 
 **Panels (quality-first):**
 
-1. **Answer quality review (Persona · Gender · Q · A)** — full answer text + Persona + Gender for the last 6h  
+1. **Answer quality review (Persona · Gender · Q · A)** — full answer text + Persona + Gender for the last **30 days**  
 2. **Latest run — compare by Persona / Gender** — all rows for the newest `run_id`  
-3. **Rows by Persona × Gender** — counts and avg latency  
+3. **Run history (last 30d)** — every `run_id` with counts / avg latency / cache mix  
+4. **Rows by Persona × Gender** — counts and avg latency  
+
+Default dashboard time range is **now-30d**. Postgres SQL panels use a 30-day filter
+independent of the picker for consistency.
 
 After changing provisioning or the dashboard JSON, reload Grafana:
 
@@ -152,7 +185,9 @@ LIMIT 20;
 
 ## JSONL bonus
 
-`benchmarks/results/<run_id>.jsonl` — one JSON object per sample. Safe to gitignore; not required for Grafana.
+`benchmarks/results/<run_id>.jsonl` — one JSON object per sample. Keep these as the
+offline archive (safe to commit for pilot regressions). Rehydrate Grafana with
+`make bench-reimport` after a volume wipe or new machine.
 
 ## Tests
 

@@ -56,6 +56,7 @@ cowatcher-knowledge = "ai_cowatcher.ingestion.knowledge_cli:main"
 cowatcher-metrics-lite = "ai_cowatcher.observability.summarize_logs:main"
 cowatcher-warm-qa-cache = "ai_cowatcher.qa.warm_cache:main"
 cowatcher-bench-ask = "ai_cowatcher.bench.ask_runner:main"
+cowatcher-bench-reimport = "ai_cowatcher.bench.reimport:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
