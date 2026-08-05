@@ -51,3 +51,21 @@ def test_stream_parser_filler_only():
 
 def test_social_default():
     assert "show" in social_body_or_default("").lower()
+
+
+def test_parse_tagged_prediction():
+    raw = "[PREDICTION]\n\nGot it — logged 'she's lying'. No spoilers until later."
+    parsed = parse_tagged_answer(raw)
+    assert parsed.tag == "PREDICTION"
+    assert "logged" in parsed.body.lower() or "lying" in parsed.body.lower()
+
+
+def test_stream_parser_prediction():
+    parser = IntentStreamParser()
+    events: list[tuple[str, str]] = []
+    for piece in ["[PRED", "ICTION]", "\n\n", "Locking it in."]:
+        events.extend(parser.feed(piece))
+    events.extend(parser.finish())
+    assert ("tag", "PREDICTION") in events
+    body = "".join(v for k, v in events if k == "text")
+    assert "Locking" in body

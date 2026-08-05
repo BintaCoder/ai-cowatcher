@@ -130,6 +130,15 @@ class Settings(BaseSettings):
         default=160, alias="LLM_SHORT_ANSWER_MAX_TOKENS"
     )
 
+    # ── Prediction Mode (spoiler-safe guesses) ───────────────────────────────
+    prediction_mode_enabled: bool = Field(default=True, alias="PREDICTION_MODE_ENABLED")
+
+    # ── Proactive trivia (opt-in client; ingest precompute) ──────────────────
+    trivia_ingest_enabled: bool = Field(default=True, alias="TRIVIA_INGEST_ENABLED")
+    trivia_min_gap_sec: float = Field(default=720.0, alias="TRIVIA_MIN_GAP_SEC")
+    trivia_max_per_session: int = Field(default=4, alias="TRIVIA_MAX_PER_SESSION")
+    trivia_ask_cooldown_sec: float = Field(default=45.0, alias="TRIVIA_ASK_COOLDOWN_SEC")
+
     # ── FFmpeg (subprocess) ───────────────────────────────────────────────────
     ffmpeg_bin: str = Field(default="ffmpeg", alias="FFMPEG_BIN")
 

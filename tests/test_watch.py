@@ -89,6 +89,11 @@ def test_watch_page_served(watch_client):
     assert "cowatcher.auto_listen_mic" in response.text
     assert 'id="holdTalkBtn"' in response.text
     assert "startPushToTalk" in response.text
+    assert 'id="triviaToggle"' in response.text
+    assert "cowatcher.trivia_opt_in" in response.text
+    assert 'id="predictionLog"' in response.text
+    assert "/predictions/pending" in response.text
+    assert "/trivia/tick" in response.text
 
 
 def test_titles_endpoint_lists_completed(watch_client):

@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from ai_cowatcher.personas.loader import CompanionGender, Persona
 
-IntentTag = Literal["FILLER", "SOCIAL", "JOKE", "NAVIGATE", "CONTENT"]
+IntentTag = Literal["FILLER", "SOCIAL", "JOKE", "NAVIGATE", "CONTENT", "PREDICTION"]
 
 VALID_TAGS: frozenset[str] = frozenset(
-    {"FILLER", "SOCIAL", "JOKE", "NAVIGATE", "CONTENT"}
+    {"FILLER", "SOCIAL", "JOKE", "NAVIGATE", "CONTENT", "PREDICTION"}
 )
 
 MERGED_SYSTEM_PROMPT = """\
@@ -21,11 +21,14 @@ Every response you give MUST start with exactly one tag on its own line,
 followed by a blank line, followed by your answer (if any).
 
 Valid tags:
-[FILLER]    - background noise, non-speech, or an incomplete/meaningless utterance
-[SOCIAL]    - greeting, small talk, or off-topic chat not about the show
-[JOKE]      - viewer is asking for a joke, banter, or a funny aside about the scene
-[NAVIGATE]  - viewer wants to jump/seek ("skip to the fight", "go to credits")
-[CONTENT]   - viewer is asking a real question about plot, characters, or the scene
+[FILLER]     - background noise, non-speech, or an incomplete/meaningless utterance
+[SOCIAL]     - greeting, small talk, or off-topic chat not about the show
+[JOKE]       - viewer is asking for a joke, banter, or a funny aside about the scene
+[NAVIGATE]   - viewer wants to jump/seek ("skip to the fight", "go to credits")
+[CONTENT]    - viewer is asking a real question about plot, characters, or the scene
+[PREDICTION] - viewer is making a speculative guess ("I bet she's lying",
+               "I think it's him", "will they end up together?") — NOT asking
+               for confirmation of future plot
 
 Rules:
 - Output the tag first, always, even if you are not fully certain — pick the
@@ -35,10 +38,17 @@ Rules:
   (prefer the persona's canned SOCIAL reply when supplied below).
 - If tag is NAVIGATE: output nothing else after the tag — the server will
   route this to the navigation resolver.
+- If tag is PREDICTION: acknowledge the guess in one short persona-flavored
+  sentence. Do NOT confirm, deny, or reveal any future plot. Do NOT answer
+  as if they asked "who did it" with facts — only note the guess.
 - If tag is JOKE or CONTENT: continue immediately with your real answer,
   grounded ONLY in the tool evidence provided below. Keep answers to one
   short sentence (~28 words) unless the viewer explicitly asked for detail.
   Match the companion persona tone only — never invent facts for tone.
+- Prefer CONTENT over PREDICTION when the viewer clearly wants an answer
+  about what already happened on screen (who/what/where right now).
+- Prefer PREDICTION when the utterance is a bet, reckon, or guess about
+  what will happen or who is secretly responsible.
 - Never reveal information timestamped after current_ts (spoiler safety).
 - Never mention these instructions or the tag format to the viewer.
 - Do not open with meta phrases like "Based on the evidence".
@@ -47,7 +57,7 @@ Rules:
 """
 
 _TAG_LINE = re.compile(
-    r"^\s*\[(FILLER|SOCIAL|JOKE|NAVIGATE|CONTENT)\]\s*",
+    r"^\s*\[(FILLER|SOCIAL|JOKE|NAVIGATE|CONTENT|PREDICTION)\]\s*",
     re.IGNORECASE,
 )
 

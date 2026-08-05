@@ -610,6 +610,8 @@ make api              # single process, warm BGE; QA cache off
 | **thought_signature** | Gemini 3 tool-call continuity field |
 | **Wake word** | Optional with Auto listen; **Hold to talk** is the primary voice path |
 | **SmartAIDucker** | State hooks → GainNode; multi-tier 20%/5%; AirPods sink bind |
+| **Prediction Mode** | `[PREDICTION]` intent; store guess; resolve only after `reveal_ts` |
+| **Proactive trivia** | Opt-in ingest-time facts; `/trivia/tick` pacing; no Gemini on tick |
 | **cast_cache** | Title-level cast JSON from ingest |
 | **QA cache** | Exact/semantic skip of full agent |
 | **Warm session** | Embedder + agent deps built at lifespan |
@@ -619,6 +621,7 @@ make api              # single process, warm BGE; QA cache off
 ## 17. Related docs
 
 - [SMART_AI_DUCKER.md](./SMART_AI_DUCKER.md) — watch-page program ducking (hooks, AirPods, VAD)  
+- [PREDICTION_AND_TRIVIA.md](./PREDICTION_AND_TRIVIA.md) — Prediction Mode + opt-in trivia  
 - [OBSERVABILITY.md](./OBSERVABILITY.md) — metrics / alerts  
 - [README.md](../README.md) — quick start  
 - `.env.example` — env dictionary  

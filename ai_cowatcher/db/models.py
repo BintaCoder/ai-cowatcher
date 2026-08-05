@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -105,6 +105,54 @@ class UserConversationTurn(Base):
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     current_ts: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Prediction(Base):
+    """Viewer speculative guess — resolved only after reveal_ts (spoiler-safe)."""
+
+    __tablename__ = "predictions"
+
+    prediction_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    viewer_label: Mapped[str] = mapped_column(String(64), nullable=False, default="you")
+    question_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    guess_text: Mapped[str] = mapped_column(Text, nullable=False)
+    character_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    topic_tags: Mapped[list] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=list
+    )
+    made_at_ts: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reveal_ts: Mapped[float] = mapped_column(Float, nullable=False)
+    resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    resolution_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class SceneTrivia(Base):
+    """Precomputed spoiler-safe production trivia for a scene (ingest-time)."""
+
+    __tablename__ = "scene_trivia"
+
+    trivia_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    scene_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    title_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    fact_text: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    flagged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    rejected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

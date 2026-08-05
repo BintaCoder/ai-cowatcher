@@ -123,6 +123,7 @@ class IngestionPipeline:
                 # Cast once per title — used by nav indexing, character graph, and /ask.
                 self._extract_and_cache_cast(title_id, repo)
                 self._index_navigation_events(title_id, repo)
+                self._index_scene_trivia(title_id, repo)
                 self._index_character_graph(title_id, repo)
                 self._index_title_knowledge(title_id)
                 total = repo.count_scene_events(title_id)
@@ -345,6 +346,45 @@ class IngestionPipeline:
             len(events),
             title_id,
             credits_ts,
+        )
+
+    def _index_scene_trivia(self, title_id: str, repo: SceneEventRepository) -> None:
+        """Precompute spoiler-filtered trivia once per title (no ask-path LLM)."""
+        if not getattr(self._settings, "trivia_ingest_enabled", True):
+            return
+        scenes = repo.list_scene_records(title_id)
+        if not scenes:
+            return
+        # Sparse sample: every Nth scene to keep ingest light (pilot).
+        stride = max(1, len(scenes) // 12) if len(scenes) > 12 else 1
+        sampled = scenes[::stride][:16]
+        from ai_cowatcher.trivia import TriviaStore, mock_trivia_candidates_for_scene
+
+        saved = 0
+        rejected = 0
+        with self._session_factory() as session:
+            store = TriviaStore(session)
+            for scene in sampled:
+                candidates = mock_trivia_candidates_for_scene(
+                    title_id=title_id,
+                    scene_id=scene.scene_id,
+                    caption=scene.caption,
+                    transcript=scene.transcript,
+                )
+                before = len(candidates)
+                kept = store.save_candidates(
+                    title_id=title_id,
+                    scene_id=scene.scene_id,
+                    candidates=candidates,
+                )
+                saved += len(kept)
+                rejected += before - len(kept)
+        logger.info(
+            "Indexed scene trivia for title %s (saved=%d rejected=%d sampled=%d)",
+            title_id,
+            saved,
+            rejected,
+            len(sampled),
         )
 
     def _cast_names(self, title_id: str, repo: SceneEventRepository) -> list[str]:

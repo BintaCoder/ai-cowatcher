@@ -14,6 +14,8 @@ from ai_cowatcher import __version__
 from ai_cowatcher.api.catalog_routes import router as catalog_router
 from ai_cowatcher.api.ask_routes import router as ask_router
 from ai_cowatcher.api.navigate_routes import router as navigate_router
+from ai_cowatcher.api.prediction_routes import router as prediction_router
+from ai_cowatcher.api.trivia_routes import router as trivia_router
 from ai_cowatcher.api.watch_routes import router as watch_router
 from ai_cowatcher.api.metrics_routes import router as metrics_router
 from ai_cowatcher.api.routes import router as ingest_router
@@ -70,6 +72,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ingest_router)
     app.include_router(ask_router)
     app.include_router(navigate_router)
+    app.include_router(prediction_router)
+    app.include_router(trivia_router)
     app.include_router(watch_router)
     app.include_router(metrics_router)
 

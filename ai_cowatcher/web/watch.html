@@ -211,6 +211,12 @@
         >
           <input id="autoListenMic" type="checkbox" /> Auto listen (wake word)
         </label>
+        <label
+          class="nav-toggle"
+          title="Occasional production trivia (off by default). Never plot spoilers."
+        >
+          <input id="triviaToggle" type="checkbox" /> Occasional trivia
+        </label>
         <button
           id="holdTalkBtn"
           type="button"
@@ -238,6 +244,12 @@
         <h3>Co-watcher</h3>
         <p id="answerText">—</p>
       </div>
+      <div class="bubble">
+        <h3>Your guesses</h3>
+        <ul id="predictionLog" style="margin:0;padding-left:1.1rem;font-size:0.92rem;opacity:0.9;">
+          <li id="predictionLogEmpty">None yet — try “I bet she’s lying.”</li>
+        </ul>
+      </div>
     </section>
   </div>
 
@@ -256,10 +268,12 @@
     const navigationMode = document.getElementById("navigationMode");
     const duckWhileTalking = document.getElementById("duckWhileTalking");
     const autoListenMic = document.getElementById("autoListenMic");
+    const triviaToggle = document.getElementById("triviaToggle");
     const holdTalkBtn = document.getElementById("holdTalkBtn");
     const statusEl = document.getElementById("status");
     const questionText = document.getElementById("questionText");
     const answerText = document.getElementById("answerText");
+    const predictionLog = document.getElementById("predictionLog");
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const synth = window.speechSynthesis;
@@ -269,6 +283,8 @@
     const LS_GENDER = "cowatcher.companion_gender";
     /** Continuous auto-listen; default off for latency/quality tests. */
     const LS_AUTO_LISTEN = "cowatcher.auto_listen_mic";
+    /** Occasional trivia; default off (hard opt-in). */
+    const LS_TRIVIA = "cowatcher.trivia_opt_in";
     /** Persona TTS presets (rate / pitch) — mirrors server persona JSON. */
     const PERSONA_TTS = {
       witty_friend: { rate: 1.06, pitch: 1.05 },
@@ -276,12 +292,26 @@
       calm_scout: { rate: 0.95, pitch: 0.95 },
     };
 
+    /** Client pacing for /trivia/tick (server also enforces). */
+    let triviaSurfacedIds = [];
+    let triviaLastSurfacedTs = null;
+    let triviaLastAskTs = null;
+    let triviaCount = 0;
+    let triviaTickTimer = null;
+    let predictionPollTimer = null;
+    let predictionRevealedIds = new Set();
+    let titleEndedFlag = false;
+
     function loadCompanionPrefs() {
       try {
         // Default false when key missing — no continuous ambient mic (isolation tests).
         if (autoListenMic) {
           const raw = localStorage.getItem(LS_AUTO_LISTEN);
           autoListenMic.checked = raw === "1" || raw === "true";
+        }
+        if (triviaToggle) {
+          const rawT = localStorage.getItem(LS_TRIVIA);
+          triviaToggle.checked = rawT === "1" || rawT === "true";
         }
         const p = localStorage.getItem(LS_PERSONA);
         if (p && personaSelect && [...personaSelect.options].some((o) => o.value === p)) {
@@ -292,6 +322,20 @@
           genderSelect.value = g;
         }
       } catch (_) { /* ignore */ }
+    }
+
+    function triviaEnabled() {
+      return Boolean(triviaToggle && triviaToggle.checked);
+    }
+
+    function persistTriviaPref() {
+      try {
+        localStorage.setItem(LS_TRIVIA, triviaEnabled() ? "1" : "0");
+      } catch (_) {}
+    }
+
+    function predictionSessionId(titleId) {
+      return `${USER_ID}:${titleId}`;
     }
 
     function saveCompanionPrefs() {
@@ -1238,6 +1282,7 @@
               else if (event.intent === "NAVIGATE") startThinkingStatus("Jump requested…");
               else if (event.intent === "SOCIAL") startThinkingStatus("Quick chat…");
               else if (event.intent === "JOKE") startThinkingStatus("Cooking a one-liner…");
+              else if (event.intent === "PREDICTION") startThinkingStatus("Logging your guess…");
             } else if (event.type === "done") {
               stopThinkingStatus();
               answer = event.answer != null ? event.answer : answer;
@@ -1260,6 +1305,10 @@
               unlockOnce();
               if (shouldSpeak) speakOnce(answer, readyMsg);
               else setStatus(readyMsg, "ok");
+              const intent = String(donePayload.intent || donePayload.escalation_reason || "");
+              if (intent.includes("PREDICTION")) {
+                void refreshPredictionLog();
+              }
             } else if (event.type === "error") {
               throw new Error(event.detail || event.message || "Ask failed");
             }
@@ -1301,9 +1350,146 @@
       speakOnce(data.answer, 'Listening for “Hey…”, then your question.');
     }
 
+    function renderPredictionLog(rows) {
+      if (!predictionLog) return;
+      predictionLog.innerHTML = "";
+      if (!rows || !rows.length) {
+        const empty = document.createElement("li");
+        empty.id = "predictionLogEmpty";
+        empty.textContent = "None yet — try “I bet she’s lying.”";
+        predictionLog.appendChild(empty);
+        return;
+      }
+      for (const row of rows) {
+        const li = document.createElement("li");
+        const guess = row.guess_text || "…";
+        const status = row.resolved
+          ? row.correct === true
+            ? "✓ resolved"
+            : row.correct === false
+              ? "✗ resolved"
+              : "resolved"
+          : "pending";
+        li.textContent = `${guess} — ${status}`;
+        predictionLog.appendChild(li);
+      }
+    }
+
+    async function refreshPredictionLog() {
+      const titleId = titleSelect.value;
+      if (!titleId || !predictionLog) return;
+      try {
+        const response = await fetch("/predictions/list", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title_id: titleId,
+            user_id: USER_ID,
+            session_id: predictionSessionId(titleId),
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        renderPredictionLog(data.predictions || []);
+      } catch (_) { /* ignore */ }
+    }
+
+    async function pollPendingPredictions() {
+      const titleId = titleSelect.value;
+      if (!titleId || askInFlight) return;
+      const currentTs = player.currentTime || 0;
+      try {
+        const response = await fetch("/predictions/pending", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title_id: titleId,
+            user_id: USER_ID,
+            session_id: predictionSessionId(titleId),
+            current_ts: currentTs,
+            title_ended: titleEndedFlag,
+            persona_id: currentPersonaId(),
+            mark_resolved: true,
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        const reveals = data.reveals || [];
+        for (const rev of reveals) {
+          if (predictionRevealedIds.has(rev.prediction_id)) continue;
+          predictionRevealedIds.add(rev.prediction_id);
+          const msg = rev.message || `Time to revisit: ${rev.guess_text || "your guess"}`;
+          answerText.textContent = msg;
+          speakOnce(msg, "Still watching with you.");
+        }
+        if (reveals.length) void refreshPredictionLog();
+      } catch (_) { /* ignore */ }
+    }
+
+    async function pollTriviaTick() {
+      if (!triviaEnabled() || askInFlight) return;
+      const titleId = titleSelect.value;
+      if (!titleId) return;
+      const currentTs = player.currentTime || 0;
+      try {
+        const response = await fetch("/trivia/tick", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title_id: titleId,
+            current_ts: currentTs,
+            enabled: true,
+            persona_id: currentPersonaId(),
+            surfaced_ids: triviaSurfacedIds,
+            last_surfaced_ts: triviaLastSurfacedTs,
+            last_ask_ts: triviaLastAskTs,
+            count: triviaCount,
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        const fact = data.trivia;
+        if (!fact) return;
+        triviaSurfacedIds = [...triviaSurfacedIds, fact.trivia_id];
+        triviaLastSurfacedTs = currentTs;
+        triviaCount += 1;
+        const msg = fact.message || fact.fact_text;
+        answerText.textContent = msg;
+        speakOnce(msg, "Still watching with you.");
+      } catch (_) { /* ignore */ }
+    }
+
+    function resetTriviaSessionState() {
+      triviaSurfacedIds = [];
+      triviaLastSurfacedTs = null;
+      triviaLastAskTs = null;
+      triviaCount = 0;
+      predictionRevealedIds = new Set();
+      titleEndedFlag = false;
+    }
+
+    function startFeaturePolls() {
+      if (predictionPollTimer) clearInterval(predictionPollTimer);
+      if (triviaTickTimer) clearInterval(triviaTickTimer);
+      predictionPollTimer = setInterval(() => { void pollPendingPredictions(); }, 8000);
+      triviaTickTimer = setInterval(() => { void pollTriviaTick(); }, 12000);
+    }
+
+    function stopFeaturePolls() {
+      if (predictionPollTimer) {
+        clearInterval(predictionPollTimer);
+        predictionPollTimer = null;
+      }
+      if (triviaTickTimer) {
+        clearInterval(triviaTickTimer);
+        triviaTickTimer = null;
+      }
+    }
+
     async function submitQuestion(question) {
       const titleId = titleSelect.value;
       if (!titleId || askInFlight) return;
+      triviaLastAskTs = player.currentTime || capturedTs || 0;
       void ensureSmartDucker();
       if (isClientNoise(question)) {
         questionText.textContent = question || "—";
@@ -1475,10 +1661,12 @@
         player.removeAttribute("src");
         player.load();
       } catch (_) {}
+      resetTriviaSessionState();
       if (!titleId) {
         sendBtn.disabled = true;
         questionInput.disabled = true;
         disableAmbientMic();
+        renderPredictionLog([]);
         return;
       }
       player.preload = "metadata";
@@ -1486,6 +1674,7 @@
       player.load();
       sendBtn.disabled = false;
       questionInput.disabled = false;
+      void refreshPredictionLog();
       if (autoListenEnabled()) {
         enableAmbientMic();
         setStatus(
@@ -1511,6 +1700,20 @@
     if (autoListenMic) {
       autoListenMic.addEventListener("change", applyAutoListenToggle);
     }
+    if (triviaToggle) {
+      triviaToggle.addEventListener("change", () => {
+        persistTriviaPref();
+        if (!triviaEnabled()) {
+          setStatus("Occasional trivia off.", "ok");
+        } else {
+          setStatus("Occasional trivia on — sparse production facts only.", "ok");
+        }
+      });
+    }
+    player.addEventListener("ended", () => {
+      titleEndedFlag = true;
+      void pollPendingPredictions();
+    });
     if (holdTalkBtn) {
       const endPtt = (event) => {
         if (event) event.preventDefault();
@@ -1578,6 +1781,7 @@
     player.preload = "metadata";
 
     loadTitles();
+    startFeaturePolls();
   </script>
 </body>
 </html>

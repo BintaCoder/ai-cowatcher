@@ -695,6 +695,11 @@ def _mock_merged_tagged_reply(messages: list[dict[str, Any]]) -> str:
     if re.fullmatch(r"(hi|hello|hey|thanks|thank you|bye|cool|lol)\.?!?", lower):
         social = persona_line or "Right here with you — ask about the show anytime."
         return f"[SOCIAL]\n\n{social}"
+    from ai_cowatcher.predictions import looks_like_prediction, persona_prediction_ack
+
+    if looks_like_prediction(question):
+        ack = persona_prediction_ack(_mock_persona_id_from_messages(messages), question)
+        return f"[PREDICTION]\n\n{ack}"
     if any(
         token in lower
         for token in ("go to", "jump to", "skip to", "take me to", "credits", "rewind")

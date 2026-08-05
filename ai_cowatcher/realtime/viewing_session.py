@@ -108,6 +108,47 @@ class ViewingSession:
         self._title_display_names[title_id] = display_name
         return display_name
 
+    def _maybe_store_prediction(
+        self,
+        *,
+        title_id: str,
+        user_id: str,
+        question: str,
+        current_ts: float,
+        intent: str | None,
+        escalation_reason: str | None,
+    ) -> None:
+        """Persist PREDICTION guesses (no extra LLM). Failures are non-fatal."""
+        if not getattr(self._settings, "prediction_mode_enabled", True):
+            return
+        tag = (intent or "").upper()
+        reason = escalation_reason or ""
+        if tag != "PREDICTION" and "merged:PREDICTION" not in reason:
+            return
+        if self._session_factory is None:
+            return
+        try:
+            from ai_cowatcher.predictions import (
+                PredictionStore,
+                extract_guess_text,
+                infer_topic_tags,
+            )
+
+            guess = extract_guess_text(question)
+            with self._session_factory() as session:
+                store = PredictionStore(session)
+                store.create_prediction(
+                    title_id=title_id,
+                    user_id=user_id,
+                    session_id=f"{user_id}:{title_id}",
+                    guess_text=guess,
+                    made_at_ts=float(current_ts),
+                    question_prompt=question,
+                    topic_tags=infer_topic_tags(guess),
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to store prediction for title %s", title_id)
+
     def persist_memory(
         self,
         *,
@@ -314,6 +355,14 @@ class ViewingSession:
                 answer=answer.text,
                 current_ts=current_ts,
             )
+        self._maybe_store_prediction(
+            title_id=title_id,
+            user_id=user_id,
+            question=question,
+            current_ts=current_ts,
+            intent=None,
+            escalation_reason=answer.escalation_reason,
+        )
 
         self._cache_store(
             title_id=title_id,
@@ -502,6 +551,14 @@ class ViewingSession:
                         answer=answer_text,
                         current_ts=current_ts,
                     )
+                self._maybe_store_prediction(
+                    title_id=title_id,
+                    user_id=user_id,
+                    question=question,
+                    current_ts=current_ts,
+                    intent=event.intent,
+                    escalation_reason=event.escalation_reason,
+                )
                 self._cache_store(
                     title_id=title_id,
                     current_ts=current_ts,

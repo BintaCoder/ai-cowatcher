@@ -532,6 +532,27 @@ class ConversationAgent:
                 joke_mode=False,
             )
             return text, True, True, False, "merged:SOCIAL"
+        if tag == "PREDICTION":
+            # Never leak plot confirmation — prefer template ack over free-form body.
+            from ai_cowatcher.predictions import (
+                extract_guess_text,
+                persona_prediction_ack,
+            )
+
+            pid = persona.persona_id if persona else None
+            guess = extract_guess_text(question)
+            # If the model already produced a short ack without spoilers, prefer it
+            # when it doesn't look like a plot answer.
+            body_clean = (body or "").strip()
+            spoilery = any(
+                w in body_clean.lower()
+                for w in ("yes,", "no,", "actually", "it was", "you're right", "wrong")
+            )
+            if body_clean and len(body_clean.split()) <= 22 and not spoilery:
+                text = enforce_brief_answer(body_clean, question, joke_mode=False)
+            else:
+                text = persona_prediction_ack(pid, guess)
+            return text, True, True, False, "merged:PREDICTION"
         if tag == "JOKE":
             text, used = self._finalize_answer(
                 raw=body or None,
@@ -727,8 +748,8 @@ class ConversationAgent:
                         emit_tokens = False
                 elif kind == "text" and emit_tokens:
                     body_parts.append(value)
-                    # Stream body only for SOCIAL / JOKE / CONTENT
-                    if tag in ("SOCIAL", "JOKE", "CONTENT") or tag is None:
+                    # Stream body for SOCIAL / JOKE / CONTENT / PREDICTION
+                    if tag in ("SOCIAL", "JOKE", "CONTENT", "PREDICTION") or tag is None:
                         if first_client_token:
                             first_client_token = False
                             logger.info(
@@ -750,7 +771,7 @@ class ConversationAgent:
                     emit_tokens = False
             elif kind == "text" and emit_tokens:
                 body_parts.append(value)
-                if tag in ("SOCIAL", "JOKE", "CONTENT"):
+                if tag in ("SOCIAL", "JOKE", "CONTENT", "PREDICTION"):
                     yield AskStreamEvent(type="token", text=value)
 
         raw_body = "".join(body_parts)
@@ -779,7 +800,7 @@ class ConversationAgent:
         if (
             text
             and text.strip() != streamed
-            and final_tag in ("CONTENT", "JOKE", "SOCIAL")
+            and final_tag in ("CONTENT", "JOKE", "SOCIAL", "PREDICTION")
             and not navigate
         ):
             # Client already saw tokens; done.answer is source of truth
