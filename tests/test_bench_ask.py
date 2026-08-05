@@ -345,3 +345,87 @@ def test_reimport_jsonl_dir(tmp_path: Path) -> None:
         assert stats2["skipped"] == 2
         assert stats2["inserted"] == 0
         assert session.scalar(select(func.count()).select_from(BenchAskResult)) == 2
+
+
+def test_reimport_replaces_partial_run(tmp_path: Path) -> None:
+    from sqlalchemy import create_engine, event, func, select
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from ai_cowatcher.bench.store import BenchResultRow, insert_bench_result, reimport_jsonl_file
+    from ai_cowatcher.db.base import Base
+    from ai_cowatcher.db.models import BenchAskResult
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _pragma(dbapi_connection, _):
+        cur = dbapi_connection.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    Base.metadata.create_all(bind=engine)
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    path = tmp_path / "partial.jsonl"
+    rows = [
+        {
+            "run_id": "partial1",
+            "title_id": "t",
+            "question_id": "q01",
+            "question": "One",
+            "current_ts": 1.0,
+            "answer": "A1",
+            "latency_ms": 5.0,
+            "cache_source": "miss",
+            "model_name": "m",
+            "model_tier": "fast",
+            "status": "ok",
+            "created_at": "2026-08-04T12:00:00+00:00",
+        },
+        {
+            "run_id": "partial1",
+            "title_id": "t",
+            "question_id": "q02",
+            "question": "Two",
+            "current_ts": 2.0,
+            "answer": "A2",
+            "latency_ms": 6.0,
+            "cache_source": "miss",
+            "model_name": "m",
+            "model_tier": "fast",
+            "status": "ok",
+            "created_at": "2026-08-04T12:00:01+00:00",
+        },
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    with factory() as session:
+        insert_bench_result(
+            session,
+            BenchResultRow(
+                run_id="partial1",
+                title_id="t",
+                question_id="q01",
+                question="One",
+                current_ts=1.0,
+                answer="stale",
+                latency_ms=1.0,
+                cache_source="miss",
+                model_name="m",
+                model_tier="fast",
+            ),
+        )
+        n, status = reimport_jsonl_file(session, path)
+        assert status == "replaced"
+        assert n == 2
+        assert session.scalar(select(func.count()).select_from(BenchAskResult)) == 2
+        answers = session.scalars(
+            select(BenchAskResult.answer).where(BenchAskResult.run_id == "partial1")
+        ).all()
+        assert "A2" in answers
+        assert "stale" not in answers

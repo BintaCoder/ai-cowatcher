@@ -1,4 +1,4 @@
-.PHONY: up up-core down logs install api api-dev ingest worker health bench-ask bench-reimport
+.PHONY: up up-core down logs install api api-dev ingest worker health bench-ask bench-reimport bench-status
 
 # Q&A answer cache (host API via `make api` / `make api-dev`; compose is infra only).
 # Default off for latency testing. Override on the command line:
@@ -81,7 +81,14 @@ bench-ask:
 # Restore Grafana/Postgres from JSONL archives under benchmarks/results/ (idempotent).
 # Usage: make bench-reimport
 #        make bench-reimport FILE=benchmarks/results/26b168323136.jsonl
+#        make bench-reimport REPLACE=1   # wipe+reload all archived run_ids
 bench-reimport:
 	TOKENIZERS_PARALLELISM=false PYTHONPATH=. .venv/bin/python -m ai_cowatcher.bench.reimport \
 		$(if $(FILE),--file $(FILE),--dir $(or $(DIR),benchmarks/results)) \
-		$(if $(FORCE),--force,)
+		$(if $(FORCE),--force,) \
+		$(if $(REPLACE),--replace-existing,)
+
+# Compare Postgres vs benchmarks/results/*.jsonl (diagnose empty Grafana).
+bench-status:
+	TOKENIZERS_PARALLELISM=false PYTHONPATH=. .venv/bin/python -m ai_cowatcher.bench.status \
+		$(if $(DIR),--dir $(DIR),)

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ai_cowatcher.config import Settings, get_settings
@@ -137,11 +137,27 @@ def row_from_jsonl_dict(payload: dict[str, Any]) -> BenchResultRow:
     )
 
 
-def run_id_exists(session: Session, run_id: str) -> bool:
-    count = session.scalar(
-        select(func.count()).select_from(BenchAskResult).where(BenchAskResult.run_id == run_id)
+def run_id_row_count(session: Session, run_id: str) -> int:
+    return int(
+        session.scalar(
+            select(func.count())
+            .select_from(BenchAskResult)
+            .where(BenchAskResult.run_id == run_id)
+        )
+        or 0
     )
-    return int(count or 0) > 0
+
+
+def run_id_exists(session: Session, run_id: str) -> bool:
+    return run_id_row_count(session, run_id) > 0
+
+
+def delete_run_rows(session: Session, run_id: str) -> int:
+    result = session.execute(
+        delete(BenchAskResult).where(BenchAskResult.run_id == run_id)
+    )
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 def reimport_jsonl_file(
@@ -149,10 +165,11 @@ def reimport_jsonl_file(
     path: Path,
     *,
     skip_existing_run: bool = True,
+    replace_existing: bool = False,
 ) -> tuple[int, str]:
     """
     Re-insert rows from a JSONL archive into Postgres.
-    Returns (inserted_count, status) where status is ok|skipped|empty|error.
+    Returns (inserted_count, status) where status is ok|skipped|empty|error|replaced.
     """
     if not path.is_file():
         return 0, "error"
@@ -166,9 +183,31 @@ def reimport_jsonl_file(
 
     first = json.loads(lines[0])
     run_id = str(first.get("run_id") or path.stem)
-    if skip_existing_run and run_id_exists(session, run_id):
-        logger.info("bench reimport skip existing run_id=%s path=%s", run_id, path.name)
+    expected = len(lines)
+    db_count = run_id_row_count(session, run_id)
+
+    if replace_existing and db_count > 0:
+        delete_run_rows(session, run_id)
+        db_count = 0
+    elif skip_existing_run and db_count >= expected:
+        logger.info(
+            "bench reimport skip complete run_id=%s path=%s db=%d jsonl=%d",
+            run_id,
+            path.name,
+            db_count,
+            expected,
+        )
         return 0, "skipped"
+    elif skip_existing_run and db_count > 0:
+        # Partial Postgres row set — replace so Grafana gets full Q&A text.
+        logger.info(
+            "bench reimport replacing partial run_id=%s path=%s db=%d jsonl=%d",
+            run_id,
+            path.name,
+            db_count,
+            expected,
+        )
+        delete_run_rows(session, run_id)
 
     inserted = 0
     for line in lines:
@@ -178,7 +217,8 @@ def reimport_jsonl_file(
             row.run_id = run_id
         insert_bench_result(session, row)
         inserted += 1
-    return inserted, "ok"
+    status = "replaced" if db_count > 0 else "ok"
+    return inserted, status
 
 
 def reimport_jsonl_dir(
@@ -186,16 +226,27 @@ def reimport_jsonl_dir(
     directory: Path,
     *,
     skip_existing_run: bool = True,
+    replace_existing: bool = False,
 ) -> dict[str, int]:
     """Import all *.jsonl under directory. Returns counters."""
-    stats = {"files": 0, "inserted": 0, "skipped": 0, "empty": 0, "error": 0}
+    stats = {
+        "files": 0,
+        "inserted": 0,
+        "skipped": 0,
+        "empty": 0,
+        "error": 0,
+        "replaced": 0,
+    }
     if not directory.is_dir():
         return stats
     for path in sorted(directory.glob("*.jsonl")):
         stats["files"] += 1
         try:
             n, status = reimport_jsonl_file(
-                session, path, skip_existing_run=skip_existing_run
+                session,
+                path,
+                skip_existing_run=skip_existing_run,
+                replace_existing=replace_existing,
             )
         except Exception:  # noqa: BLE001
             logger.exception("bench reimport failed path=%s", path)
@@ -208,4 +259,6 @@ def reimport_jsonl_dir(
             stats["empty"] += 1
         elif status == "error":
             stats["error"] += 1
+        elif status == "replaced":
+            stats["replaced"] += 1
     return stats

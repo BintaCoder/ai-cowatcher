@@ -30,8 +30,26 @@ make bench-reimport
 docker compose restart grafana   # pick up dashboard JSON changes
 ```
 
-Reimport is idempotent (skips `run_id`s already in Postgres). Use `FORCE=1` only if you
-want duplicate inserts.
+Reimport is idempotent (skips complete `run_id`s). Use `FORCE=1` only if you
+want duplicate inserts. Use `REPLACE=1` to delete and reload every archived run:
+
+```bash
+make bench-reimport REPLACE=1
+```
+
+### Grafana still empty?
+
+```bash
+make bench-status          # Postgres row counts vs JSONL files
+make bench-reimport REPLACE=1
+docker compose restart grafana
+```
+
+Open **Ask Bench** → top panel **Archive — all stored rows** (no time filter).
+Set dashboard time range to **Last 7 days** (top-right) for filtered panels.
+
+If `bench-status` shows rows but Grafana is empty: **Connections → Postgres → Test**,
+then hard-refresh the dashboard (Cmd+Shift+R).
 
 ## Product rules
 
