@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
+from ai_cowatcher.bench.store import ensure_bench_schema
 from ai_cowatcher.config import get_settings
 from ai_cowatcher.db.models import BenchAskResult
 
